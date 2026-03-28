@@ -1,20 +1,27 @@
 # Mühle hackathon — HTTP API client
 
-Python workspace for **Nine Men’s Morris** (*Mühle*) against the **Mühle HTTP API**.
+Python workspace for **Nine Men’s Morris** (_Mühle_) against the **Mühle HTTP API**.
 
 The machine-readable contract is **[`openapi.yaml`](openapi.yaml)** (OpenAPI **3.0.3**, API version **1.0.0**). The **`openapi_client`** package is **generated** from that file with [OpenAPI Generator](https://openapi-generator.tech) (`PythonClientCodegen` **7.21.0**, Pydantic v2). Regenerate the client after spec changes; do not edit `openapi_client/` by hand.
 
+## Getting Started
+
+1. Create Python Environment: `python3 -m venv .venv`
+1. Activate Environment: `source .venv/bin/activate`
+1. Install dependencies: `pip install -r requirements.txt`
+1. Run the AI Mühle solver by executing the `main.py` or enter the REPL with `python3 repl.py`
+
 ## API (`info` / `paths` from the spec)
 
-**Title:** Mühle HTTP API  
+**Title:** Mühle HTTP API
 
 **Description (spec):** REST API for the Morris session: create games, register players, execute moves, read board and state. Any number of games may run per server process; each game has its own `gameId` (UUID) and isolated actions.
 
 ### Server (`servers` in `openapi.yaml`)
 
-| URL | Description in spec |
-|-----|---------------------|
-| `http://172.28.40.187:40000` | Lokaler Dev-Server |
+| URL                          | Description in spec |
+| ---------------------------- | ------------------- |
+| `http://172.28.40.187:40000` | Lokaler Dev-Server  |
 
 Point the client at your environment with `openapi_client.Configuration(host="https://your-host")`.
 
@@ -22,15 +29,15 @@ Point the client at your environment with `openapi_client.Configuration(host="ht
 
 All paths are relative to the configured host.
 
-| Operation | Method | Path | Success | Other responses |
-|-----------|--------|------|---------|-----------------|
-| `getOpenAPISpec` | GET | `/openapi.yaml` | `200` — OpenAPI 3.0 document (`application/yaml`) | — |
-| `createGame` | POST | `/games` | `201` — `{ "message", "id" }` (`id` is UUID) | `500` + `Error` |
-| `addPlayer` | POST | `/games/{gameId}/players` | `200` — `{ "message"?, "secret" }` (`secret` → `secretCode` on moves) | `404` GameNotFound, `500` (e.g. game full) + `Error` |
-| `submitMove` | POST | `/games/{gameId}/moves` | `200` — `{ "message" }` (e.g. *Stone moved*) | `400`, `404`, `500` + `Error` |
-| `getGameState` | GET | `/games/{gameId}/state` | `200` — `{ "state" }` | `404` GameNotFound |
-| `getCurrentPlayer` | GET | `/games/{gameId}/current-player` | `200` — `{ "color" }` (example: `White`) | `404` GameNotFound |
-| `getBoard` | GET | `/games/{gameId}/board` | `200` — `{ "board" }` (object; structure defined by server) | `404` GameNotFound |
+| Operation          | Method | Path                             | Success                                                               | Other responses                                      |
+| ------------------ | ------ | -------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
+| `getOpenAPISpec`   | GET    | `/openapi.yaml`                  | `200` — OpenAPI 3.0 document (`application/yaml`)                     | —                                                    |
+| `createGame`       | POST   | `/games`                         | `201` — `{ "message", "id" }` (`id` is UUID)                          | `500` + `Error`                                      |
+| `addPlayer`        | POST   | `/games/{gameId}/players`        | `200` — `{ "message"?, "secret" }` (`secret` → `secretCode` on moves) | `404` GameNotFound, `500` (e.g. game full) + `Error` |
+| `submitMove`       | POST   | `/games/{gameId}/moves`          | `200` — `{ "message" }` (e.g. _Stone moved_)                          | `400`, `404`, `500` + `Error`                        |
+| `getGameState`     | GET    | `/games/{gameId}/state`          | `200` — `{ "state" }`                                                 | `404` GameNotFound                                   |
+| `getCurrentPlayer` | GET    | `/games/{gameId}/current-player` | `200` — `{ "color" }` (example: `White`)                              | `404` GameNotFound                                   |
+| `getBoard`         | GET    | `/games/{gameId}/board`          | `200` — `{ "board" }` (object; structure defined by server)           | `404` GameNotFound                                   |
 
 **`addPlayer`** request: `application/x-www-form-urlencoded`, required field **`playerName`**.
 
@@ -127,7 +134,7 @@ with openapi_client.ApiClient(configuration) as api_client:
 
 ## Documentation (generated)
 
-- [DefaultApi](docs/DefaultApi.md) — all operations  
+- [DefaultApi](docs/DefaultApi.md) — all operations
 - Models: [CreateGame201Response](docs/CreateGame201Response.md), [AddPlayer200Response](docs/AddPlayer200Response.md), [SubmitMove200Response](docs/SubmitMove200Response.md), [GetGameState200Response](docs/GetGameState200Response.md), [GetCurrentPlayer200Response](docs/GetCurrentPlayer200Response.md), [GetBoard200Response](docs/GetBoard200Response.md), [Error](docs/Error.md)
 
 ## Authorization
