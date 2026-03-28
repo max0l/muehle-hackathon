@@ -165,10 +165,24 @@ def _board_fields_from_payload(board_state: Mapping[str, Any] | None) -> list[di
     return fields
 
 
+def _board_piece_counts(board_state: Mapping[str, Any] | None) -> tuple[int, int]:
+    white_on_board = 0
+    black_on_board = 0
+    for field in _board_fields_from_payload(board_state):
+        if field["Color"] == 1:
+            white_on_board += 1
+        elif field["Color"] == 2:
+            black_on_board += 1
+    return white_on_board, black_on_board
+
+
 def _position_from_api_board(
     board_state: Mapping[str, Any] | None,
     player_number: int,
     game_state: str | None,
+    *,
+    white_in_hand: int | None = None,
+    black_in_hand: int | None = None,
 ) -> Position:
     from game.board import Board
 
@@ -176,6 +190,8 @@ def _position_from_api_board(
         _board_fields_from_payload(board_state),
         states=_normalize_game_state(game_state),  # type: ignore[arg-type]
         player_to_move=player_number,
+        white_in_hand=white_in_hand,
+        black_in_hand=black_in_hand,
     )
     return board.position
 
@@ -197,6 +213,48 @@ class SearchCandidate:
     payload: PayloadValue
     score: int
     source: str
+
+
+@dataclasses.dataclass
+class HandStateTracker:
+    white_in_hand: int | None = None
+    black_in_hand: int | None = None
+    last_white_on_board: int | None = None
+    last_black_on_board: int | None = None
+
+    def observe(
+        self,
+        board_state: Mapping[str, Any] | None,
+        state_kind: Literal["waiting", "placing", "moving", "removing", "finished", "unknown"],
+    ) -> tuple[int, int]:
+        white_on_board, black_on_board = _board_piece_counts(board_state)
+        if self.white_in_hand is None or self.black_in_hand is None:
+            if state_kind == "placing":
+                self.white_in_hand = max(0, 9 - white_on_board)
+                self.black_in_hand = max(0, 9 - black_on_board)
+            elif state_kind == "removing":
+                # Best effort for mid-game joins: if not all 18 stones are on the board yet,
+                # we are still in the placement stage even though a removal is pending.
+                still_placing = white_on_board + black_on_board < 18
+                self.white_in_hand = max(0, 9 - white_on_board) if still_placing else 0
+                self.black_in_hand = max(0, 9 - black_on_board) if still_placing else 0
+            else:
+                self.white_in_hand = 0
+                self.black_in_hand = 0
+        else:
+            white_gain = 0 if self.last_white_on_board is None else max(0, white_on_board - self.last_white_on_board)
+            black_gain = 0 if self.last_black_on_board is None else max(0, black_on_board - self.last_black_on_board)
+            if white_gain:
+                self.white_in_hand = max(0, self.white_in_hand - white_gain)
+            if black_gain:
+                self.black_in_hand = max(0, self.black_in_hand - black_gain)
+            if state_kind in {"moving", "finished"}:
+                self.white_in_hand = 0
+                self.black_in_hand = 0
+
+        self.last_white_on_board = white_on_board
+        self.last_black_on_board = black_on_board
+        return self.white_in_hand, self.black_in_hand
 
 
 def _format_move(move: Move) -> str:
@@ -239,9 +297,17 @@ def choose_move(
     player_number: int,
     game_state: str | None,
     *,
+    white_in_hand: int | None = None,
+    black_in_hand: int | None = None,
     debug: bool = False,
 ) -> tuple[Move, PayloadValue] | None:
-    position = _position_from_api_board(board_state, player_number, game_state)
+    position = _position_from_api_board(
+        board_state,
+        player_number,
+        game_state,
+        white_in_hand=white_in_hand,
+        black_in_hand=black_in_hand,
+    )
     candidates = legal_moves(position)
     if not candidates:
         if debug:
@@ -295,6 +361,8 @@ def make_move(
     player_number: int,
     game_state: str | None,
     *,
+    white_in_hand: int | None = None,
+    black_in_hand: int | None = None,
     debug: bool = False,
 ) -> Move | None:
     """Compute and submit the next move using the packed state DB."""
@@ -317,6 +385,8 @@ def make_move(
         board_state,
         player_number,
         game_state,
+        white_in_hand=white_in_hand,
+        black_in_hand=black_in_hand,
         debug=debug,
     )
     if chosen is None:
@@ -348,6 +418,7 @@ def game_loop(
     """Poll current player every ``POLL_INTERVAL_SEC``; on our turn, load board/state and call ``make_move``."""
     player_number = 1 if our_color == "white" else 2
     last_wait_reason: tuple[str, str | None] | None = None
+    hand_state = HandStateTracker()
     while True:
         game_state_resp = api.get_game_state(game_id)
         state_kind = _classify_server_state(game_state_resp.state)
@@ -365,6 +436,10 @@ def game_loop(
             time.sleep(POLL_INTERVAL_SEC)
             continue
 
+        board_resp = api.get_board(game_id)
+        board_state = board_resp.board if isinstance(board_resp.board, dict) else None
+        white_in_hand, black_in_hand = hand_state.observe(board_state, state_kind)
+
         current = api.get_current_player(game_id)
         api_color = _normalize_api_color(current.color)
         if api_color != our_color:
@@ -378,8 +453,6 @@ def game_loop(
             time.sleep(POLL_INTERVAL_SEC)
             continue
 
-        board_resp = api.get_board(game_id)
-        board_state = board_resp.board if isinstance(board_resp.board, dict) else None
         last_wait_reason = None
         make_move(
             api,
@@ -389,6 +462,8 @@ def game_loop(
             board_state,
             player_number,
             game_state_resp.state,
+            white_in_hand=white_in_hand,
+            black_in_hand=black_in_hand,
             debug=debug,
         )
         time.sleep(POLL_INTERVAL_SEC)

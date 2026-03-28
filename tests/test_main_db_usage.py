@@ -219,6 +219,62 @@ def test_normalize_game_state_maps_removingstone_to_remove() -> None:
     assert main._normalize_game_state("RemovingStone") == "remove"
 
 
+def test_hand_tracker_keeps_in_hand_counts_during_placement_removal() -> None:
+    tracker = main.HandStateTracker()
+
+    white_in_hand, black_in_hand = tracker.observe(
+        {
+            "Fields": [
+                {"Index": 0, "Color": 1},
+                {"Index": 1, "Color": 1},
+                {"Index": 9, "Color": 2},
+                {"Index": 10, "Color": 2},
+            ]
+        },
+        "placing",
+    )
+    assert (white_in_hand, black_in_hand) == (7, 7)
+
+    white_in_hand, black_in_hand = tracker.observe(
+        {
+            "Fields": [
+                {"Index": 0, "Color": 1},
+                {"Index": 1, "Color": 1},
+                {"Index": 2, "Color": 1},
+                {"Index": 9, "Color": 2},
+                {"Index": 10, "Color": 2},
+            ]
+        },
+        "removing",
+    )
+    assert (white_in_hand, black_in_hand) == (6, 7)
+
+
+def test_position_from_api_board_stays_in_placement_after_removal() -> None:
+    position = main._position_from_api_board(
+        {
+            "Fields": [
+                {"Index": 0, "Color": 1},
+                {"Index": 1, "Color": 1},
+                {"Index": 2, "Color": 1},
+                {"Index": 9, "Color": 2},
+                {"Index": 10, "Color": 2},
+            ]
+        },
+        1,
+        "RemovingStone",
+        white_in_hand=6,
+        black_in_hand=7,
+    )
+
+    next_position = apply_move(position, Move(type="remove", fieldIndex=9, removedPiece=9))
+
+    assert next_position.phase == "placing"
+    assert next_position.player_to_move == 2
+    assert next_position.white_in_hand == 6
+    assert next_position.black_in_hand == 7
+
+
 def test_arg_parser_accepts_explicit_create_game() -> None:
     parser = main.build_arg_parser()
 
