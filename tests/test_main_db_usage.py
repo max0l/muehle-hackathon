@@ -36,6 +36,24 @@ class RecordingApi:
         )
 
 
+class LoopApi:
+    def __init__(self, state: str) -> None:
+        self.state = state
+        self.get_current_player_called = 0
+        self.get_board_called = 0
+
+    def get_game_state(self, game_id):
+        return type("GameStateResponse", (), {"state": self.state})()
+
+    def get_current_player(self, game_id):
+        self.get_current_player_called += 1
+        return type("CurrentPlayerResponse", (), {"color": "White"})()
+
+    def get_board(self, game_id):
+        self.get_board_called += 1
+        return type("BoardResponse", (), {"board": {"Fields": []}})()
+
+
 def test_packed_store_uses_metadata_page_entries(tmp_path) -> None:
     output = tmp_path / "state_db"
     heuristic = get_value_codec("heuristic")
@@ -214,3 +232,19 @@ def test_arg_parser_accepts_join_game_alias() -> None:
 
     assert args.create_game is False
     assert args.join_game_id == game_id
+
+
+def test_game_loop_exits_immediately_on_winning_state(monkeypatch, capsys, tmp_path) -> None:
+    api = LoopApi("WinWhite")
+    output = tmp_path / "state_db"
+    heuristic = get_value_codec("heuristic")
+    store = PackedStateStore(output, heuristic, page_entries=64)
+    store.initialize_build({"generator": "test"}, reset_queue=True)
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: None)
+
+    main.game_loop(api, uuid4(), "white", "secret", store)
+
+    captured = capsys.readouterr()
+    assert "Game finished: WinWhite" in captured.err
+    assert api.get_current_player_called == 0
+    assert api.get_board_called == 0

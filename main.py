@@ -347,6 +347,22 @@ def game_loop(
     player_number = 1 if our_color == "white" else 2
     last_wait_reason: tuple[str, str | None] | None = None
     while True:
+        game_state_resp = api.get_game_state(game_id)
+        state_kind = _classify_server_state(game_state_resp.state)
+        if state_kind == "finished":
+            print(f"Game finished: {game_state_resp.state}", file=sys.stderr)
+            return
+        if state_kind == "waiting":
+            wait_reason = ("waiting", game_state_resp.state)
+            if wait_reason != last_wait_reason:
+                if debug:
+                    _search_debug.debug("search: server state=%s; waiting for players", game_state_resp.state)
+                else:
+                    print("Waiting for players.", file=sys.stderr)
+                last_wait_reason = wait_reason
+            time.sleep(POLL_INTERVAL_SEC)
+            continue
+
         current = api.get_current_player(game_id)
         api_color = _normalize_api_color(current.color)
         if api_color != our_color:
@@ -362,18 +378,6 @@ def game_loop(
 
         board_resp = api.get_board(game_id)
         board_state = board_resp.board if isinstance(board_resp.board, dict) else None
-        game_state_resp = api.get_game_state(game_id)
-        state_kind = _classify_server_state(game_state_resp.state)
-        if state_kind == "waiting":
-            wait_reason = ("waiting", game_state_resp.state)
-            if wait_reason != last_wait_reason:
-                if debug:
-                    _search_debug.debug("search: server state=%s; waiting for players", game_state_resp.state)
-                else:
-                    print("Waiting for players.", file=sys.stderr)
-                last_wait_reason = wait_reason
-            time.sleep(POLL_INTERVAL_SEC)
-            continue
         last_wait_reason = None
         make_move(
             api,
