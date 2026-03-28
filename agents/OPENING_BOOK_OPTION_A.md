@@ -62,6 +62,8 @@ Für Blattknoten außerhalb des Opening Books:
 - potenzielle Mühlen im nächsten Zug
 - Phasenabhängige Gewichtung
 
+**Literatur / Einordnung:** Gasser (1996) bewertet die Eröffnung nicht mit einer solchen Polynom-Heuristik, sondern mit **Endspieldatenbanken an der Suchhorizont** — siehe [GASSER_OPENING_HEURISTICS.md](./GASSER_OPENING_HEURISTICS.md) für eine konkrete Feature-Empfehlung, falls **keine** DB verfügbar ist.
+
 ### 6. Suchalgorithmus
 
 Implementieren:

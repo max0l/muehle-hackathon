@@ -10,6 +10,7 @@ This folder is **onboarding and reference material for AI coding agents** workin
 | [GAME_RULES.md](./GAME_RULES.md) | Nine Men’s Morris rules relevant to logic and move generation |
 | [SERVER_API.md](./SERVER_API.md) | HTTP contract summary (source of truth: `openapi.yaml` at repo root) |
 | [OPENING_BOOK_OPTION_A.md](./OPENING_BOOK_OPTION_A.md) | Plan Option A: Eröffnungsbuch via Negamax/Alpha-Beta, TT, Heuristik, CLI, Tests, offene Regelfragen |
+| [GASSER_OPENING_HEURISTICS.md](./GASSER_OPENING_HEURISTICS.md) | Gasser (1996): opening = search + DB leaves; rule variants; heuristic fallback when no DB |
 
 ## Quick facts
 
