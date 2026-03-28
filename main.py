@@ -29,6 +29,13 @@ def main() -> None:
         print(game)
         player = api_instance.add_player(game.id, "player1")
         print(player)
+        player2 = api_instance.add_player(game.id, "player2")
+        print(player2)
+        # Both players must join before the game enters the placing-stones phase.
+        move = api_instance.submit_move(
+            game.id, "place", player.secret, field_index="0"
+        )
+        print(move)
 
 if __name__ == "__main__":
     main()
