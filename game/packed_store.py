@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from game.encoding import decode_position, encode_position, index_position, subspace_id
+from game.encoding import decode_position, index_position
 from game.value_codec import ValueCodec
 
 QUEUE_RECORD_SIZE = 32
@@ -43,6 +42,15 @@ class PackedStateStore:
         self.metadata: dict[str, Any] = {}
         if self.metadata_path.exists():
             self.metadata = json.loads(self.metadata_path.read_text())
+            metadata_page_entries = self.metadata.get("page_entries")
+            if isinstance(metadata_page_entries, int):
+                self.page_entries = metadata_page_entries
+            metadata_codec_mode = self.metadata.get("codec_mode")
+            if metadata_codec_mode and metadata_codec_mode != self.codec.mode:
+                raise ValueError(
+                    f"Packed store was built with codec mode {metadata_codec_mode!r}, "
+                    f"but {self.codec.mode!r} was requested"
+                )
 
     def _flush_metadata(self) -> None:
         self.metadata_path.write_text(json.dumps(self.metadata, indent=2, sort_keys=True))

@@ -1,19 +1,26 @@
+from __future__ import annotations
+
 import argparse
+import dataclasses
 import logging
 import sys
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Mapping, Tuple, Union
 from uuid import UUID
 
 import openapi_client
 from openapi_client import DefaultApi
 from openapi_client.rest import ApiException
 
+from game import Move, PackedStateStore, Position, apply_move, get_value_codec, legal_moves
+from game.heuristics import heuristic_score
 from game_client import DEFAULT_API_HOST, DEFAULT_PLAYER_NAME, join_as_player, resolve_game_id
 
 PlayerColor = Literal["white", "black"]
+PayloadValue = Union[int, Tuple[int, int]]
 
 _http_debug = logging.getLogger(__name__ + ".http")
+_search_debug = logging.getLogger(__name__ + ".search")
 
 
 def _setup_verbose_logging() -> None:
@@ -25,6 +32,17 @@ def _setup_verbose_logging() -> None:
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("%(message)s"))
     _http_debug.addHandler(handler)
+
+
+def _setup_search_debug_logging() -> None:
+    _search_debug.setLevel(logging.DEBUG)
+    _search_debug.propagate = False
+    if _search_debug.handlers:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    _search_debug.addHandler(handler)
 
 
 class VerboseApiClient(openapi_client.ApiClient):
@@ -64,16 +82,208 @@ def _normalize_api_color(color: str | None) -> str | None:
     return color.strip().lower()
 
 
+def _normalize_game_state(game_state: str | None) -> str:
+    if not game_state:
+        return "moving"
+    normalized = game_state.strip().lower()
+    if any(token in normalized for token in ("remove", "take", "schlag")):
+        return "remove"
+    if any(token in normalized for token in ("end", "over", "won", "lost", "draw", "finish")):
+        return "end"
+    if any(token in normalized for token in ("place", "placing", "setz")):
+        return "placing"
+    return "moving"
+
+
+def _board_fields_from_payload(board_state: Mapping[str, Any] | None) -> list[dict[str, int]]:
+    if not board_state:
+        return []
+    raw_fields = board_state.get("Fields") or board_state.get("fields") or []
+    fields: list[dict[str, int]] = []
+    for row in raw_fields:
+        if not isinstance(row, dict):
+            continue
+        index = row.get("Index", row.get("index"))
+        color = row.get("Color", row.get("color"))
+        if index is None or color is None:
+            continue
+        fields.append({"Index": int(index), "Color": int(color)})
+    return fields
+
+
+def _position_from_api_board(
+    board_state: Mapping[str, Any] | None,
+    player_number: int,
+    game_state: str | None,
+) -> Position:
+    from game.board import Board
+
+    board = Board(
+        _board_fields_from_payload(board_state),
+        states=_normalize_game_state(game_state),  # type: ignore[arg-type]
+        player_to_move=player_number,
+    )
+    return board.position
+
+
+def _payload_to_score(payload: PayloadValue) -> int:
+    if isinstance(payload, tuple):
+        wdl, depth = payload
+        if wdl > 0:
+            return 1_000_000 - depth
+        if wdl < 0:
+            return -1_000_000 + depth
+        return 0
+    return payload
+
+
+@dataclasses.dataclass(frozen=True)
+class SearchCandidate:
+    move: Move
+    payload: PayloadValue
+    score: int
+    source: str
+
+
+def _format_move(move: Move) -> str:
+    if move.type == "move":
+        return f"move {move.fieldIndex}->{move.toFieldIndex}"
+    if move.type == "remove":
+        target = move.removedPiece if move.removedPiece is not None else move.fieldIndex
+        return f"remove {target}"
+    return f"place {move.fieldIndex}"
+
+
+def _log_search_summary(
+    position: Position,
+    candidates: list[SearchCandidate],
+    db_hits: int,
+    db_misses: int,
+) -> None:
+    _search_debug.debug(
+        "search: phase=%s to_move=%s legal_moves=%d db_hits=%d db_misses=%d",
+        position.phase,
+        position.player_to_move,
+        len(candidates),
+        db_hits,
+        db_misses,
+    )
+    for rank, candidate in enumerate(candidates[:5], start=1):
+        _search_debug.debug(
+            "search: #%d %s score=%s payload=%s source=%s",
+            rank,
+            _format_move(candidate.move),
+            candidate.score,
+            candidate.payload,
+            candidate.source,
+        )
+
+
+def choose_move(
+    store: PackedStateStore,
+    board_state: Mapping[str, Any] | None,
+    player_number: int,
+    game_state: str | None,
+    *,
+    debug: bool = False,
+) -> tuple[Move, PayloadValue] | None:
+    position = _position_from_api_board(board_state, player_number, game_state)
+    candidates = legal_moves(position)
+    if not candidates:
+        if debug:
+            _search_debug.debug(
+                "search: phase=%s to_move=%s legal_moves=0",
+                position.phase,
+                position.player_to_move,
+            )
+        return None
+
+    best_move: Move | None = None
+    best_value: PayloadValue | None = None
+    best_score: int | None = None
+    ranked_candidates: list[SearchCandidate] = []
+    db_hits = 0
+    db_misses = 0
+    for move in candidates:
+        next_position = apply_move(position, move)
+        payload = store.lookup(next_position)
+        source = "db"
+        if payload is None:
+            payload = heuristic_score(next_position)
+            source = "heuristic"
+            db_misses += 1
+        else:
+            db_hits += 1
+        score = _payload_to_score(payload)
+        ranked_candidates.append(
+            SearchCandidate(move=move, payload=payload, score=score, source=source)
+        )
+        if best_score is None or score > best_score:
+            best_move = move
+            best_value = payload
+            best_score = score
+
+    ranked_candidates.sort(key=lambda candidate: candidate.score, reverse=True)
+    if debug:
+        _log_search_summary(position, ranked_candidates, db_hits, db_misses)
+
+    if best_move is None or best_value is None:
+        return None
+    return best_move, best_value
+
+
 def make_move(
+    api: DefaultApi,
+    game_id: UUID,
+    secret: str,
+    store: PackedStateStore,
     board_state: dict[str, Any] | None,
     player_number: int,
     game_state: str | None,
+    *,
+    debug: bool = False,
+) -> Move | None:
+    """Compute and submit the next move using the packed state DB."""
+    chosen = choose_move(
+        store,
+        board_state,
+        player_number,
+        game_state,
+        debug=debug,
+    )
+    if chosen is None:
+        return None
+
+    move, payload = chosen
+    if debug:
+        _search_debug.debug("search: selected %s payload=%s", _format_move(move), payload)
+    else:
+        print(f"Selected move: {move} -> {payload}", file=sys.stderr)
+    if move.type == "move":
+        api.submit_move(
+            game_id,
+            move.type,
+            secret,
+            field_index=str(move.fieldIndex),
+            to_field_index=str(move.toFieldIndex),
+        )
+    elif move.type == "remove":
+        target = move.removedPiece if move.removedPiece is not None else move.fieldIndex
+        api.submit_move(game_id, move.type, secret, field_index=str(target))
+    else:
+        api.submit_move(game_id, move.type, secret, field_index=str(move.fieldIndex))
+    return move
+
+
+def game_loop(
+    api: DefaultApi,
+    game_id: UUID,
+    our_color: PlayerColor,
+    secret: str,
+    store: PackedStateStore,
+    *,
+    debug: bool = False,
 ) -> None:
-    """Compute and submit the next move. Stub until move logic is implemented."""
-    pass
-
-
-def game_loop(api: DefaultApi, game_id: UUID, our_color: PlayerColor) -> None:
     """Poll current player every ``POLL_INTERVAL_SEC``; on our turn, load board/state and call ``make_move``."""
     player_number = 1 if our_color == "white" else 2
     while True:
@@ -86,7 +296,16 @@ def game_loop(api: DefaultApi, game_id: UUID, our_color: PlayerColor) -> None:
         board_resp = api.get_board(game_id)
         board_state = board_resp.board if isinstance(board_resp.board, dict) else None
         game_state_resp = api.get_game_state(game_id)
-        make_move(board_state, player_number, game_state_resp.state)
+        make_move(
+            api,
+            game_id,
+            secret,
+            store,
+            board_state,
+            player_number,
+            game_state_resp.state,
+            debug=debug,
+        )
         time.sleep(POLL_INTERVAL_SEC)
 
 
@@ -119,20 +338,57 @@ def main() -> None:
         action="store_true",
         help="Log one line per HTTP request (method, URL, status) to stderr.",
     )
+    parser.add_argument(
+        "--db-path",
+        default="state_db.packed",
+        help='Path to the packed state database directory (default: "state_db.packed").',
+    )
+    parser.add_argument(
+        "--db-value-mode",
+        choices=("heuristic", "wdl", "wdl-depth"),
+        default="heuristic",
+        help="Payload mode used when the packed DB was generated.",
+    )
+    parser.add_argument(
+        "--search-debug",
+        action="store_true",
+        help="Log move search status, DB hits/misses, and top candidates to stderr.",
+    )
     args = parser.parse_args()
 
     if args.verbose:
         _setup_verbose_logging()
+    if args.search_debug:
+        _setup_search_debug_logging()
 
     configuration = openapi_client.Configuration(host=DEFAULT_API_HOST)
     client_cls = VerboseApiClient if args.verbose else openapi_client.ApiClient
     try:
+        store = PackedStateStore(args.db_path, get_value_codec(args.db_value_mode), readonly=True)
+        if args.search_debug:
+            _search_debug.debug(
+                "search: loaded store path=%s mode=%s page_entries=%s entries=%s",
+                args.db_path,
+                args.db_value_mode,
+                store.page_entries,
+                store.entry_count(),
+            )
         with client_cls(configuration) as api_client:
             api = openapi_client.DefaultApi(api_client)
             game_id = resolve_game_id(api, args.game_id)
-            join_as_player(api, game_id, args.player)
+            joined = join_as_player(api, game_id, args.player)
+            if not joined.secret:
+                print("Server did not return a player secret.", file=sys.stderr)
+                raise SystemExit(1)
             try:
-                game_loop(api, game_id, args.color)
+                game_loop(
+                    api,
+                    game_id,
+                    args.color,
+                    joined.secret,
+                    store,
+                    debug=args.search_debug,
+                )
             except KeyboardInterrupt:
                 print("\nStopped.", file=sys.stderr)
                 raise SystemExit(0) from None
