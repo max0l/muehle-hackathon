@@ -11,6 +11,7 @@ This folder is **onboarding and reference material for AI coding agents** workin
 | [SERVER_API.md](./SERVER_API.md) | HTTP contract summary (source of truth: `openapi.yaml` at repo root) |
 | [OPENING_BOOK_OPTION_A.md](./OPENING_BOOK_OPTION_A.md) | Plan Option A: Eröffnungsbuch via Negamax/Alpha-Beta, TT, Heuristik, CLI, Tests, offene Regelfragen |
 | [GASSER_OPENING_HEURISTICS.md](./GASSER_OPENING_HEURISTICS.md) | Gasser (1996): opening = search + DB leaves; rule variants; heuristic fallback when no DB |
+| [MID_ENDGAME_DATABASE_PLAN.md](./MID_ENDGAME_DATABASE_PLAN.md) | Plan: retrograde mid/end tables — canonical encoding, perfect indexing, predecessors, build & lookup |
 
 ## Quick facts
 
@@ -18,6 +19,46 @@ This folder is **onboarding and reference material for AI coding agents** workin
 - **This repo:** **Client only** — talks to a remote game server; does not host match state or authoritative rules on the wire beyond what the server enforces.
 - **Expected client capabilities:** Local **game logic** (validation, move listing, state representation), plus **heuristics / search / AI** to choose or analyze moves against the server API.
 
+## Generated OpenAPI Python client (`openapi_client`)
+
+The repo root package **`openapi_client/`** is **auto-generated** from **`openapi.yaml`** by [OpenAPI Generator](https://openapi-generator.tech) (`PythonClientCodegen`, Pydantic v2 models, `urllib3`). Treat it as **read-only**: fix the spec and **regenerate** instead of editing generated files. Metadata: **`.openapi-generator/`**, **`.openapi-generator-ignore`**, root **`README.md`** and **`docs/`** (per-operation examples).
+
+### How to use it
+
+1. **`openapi_client.Configuration(host=...)`** — set the server base URL (default in spec is only an example; `main.py` hard-codes a dev host).
+2. **`openapi_client.ApiClient(configuration)`** as a context manager (or long-lived client).
+3. **`openapi_client.DefaultApi(api_client)`** — all REST operations are methods on this class.
+
+### `DefaultApi` ↔ HTTP
+
+| Python method | HTTP | Success model / notes |
+|---------------|------|------------------------|
+| `create_game()` | `POST /games` | `CreateGame201Response` — `id` (`UUID`), `message` |
+| `add_player(game_id, player_name)` | `POST /games/{gameId}/players` (form) | `AddPlayer200Response` — `secret` (move auth), optional `message` |
+| `submit_move(game_id, action, secret_code, field_index=..., to_field_index=...)` | `POST /games/{gameId}/moves` (form) | `SubmitMove200Response`; `action` is `str` at type level — use `place` / `move` / `remove` per spec |
+| `get_game_state(game_id)` | `GET /games/{gameId}/state` | `GetGameState200Response` — `state` |
+| `get_current_player(game_id)` | `GET /games/{gameId}/current-player` | `GetCurrentPlayer200Response` — `color` |
+| `get_board(game_id)` | `GET /games/{gameId}/board` | `GetBoard200Response` — `board` is **`Dict[str, Any]`** (schema is open in the spec; parse defensively in game logic) |
+| `get_open_api_spec()` | `GET /openapi.yaml` | Raw spec payload (string) |
+
+Each operation also has `*_with_http_info` (access status headers) and `*_without_preload_content` variants.
+
+### Errors and typing
+
+- Failures raise **`openapi_client.rest.ApiException`** (HTTP status and body available on the exception object).
+- **`Error`** model: `{ "error": str }` for documented error responses.
+- **`game_id`** parameters are **`uuid.UUID`**, not strings — convert when reading IDs from JSON/config.
+
+### Tests and layout
+
+- **`test/`** — generated tests against the package (e.g. `DefaultApi`, models); **`tox.ini`** / CI run **`pytest --cov=openapi_client`**.
+- App code can live beside the package (e.g. **`main.py`**) and import `openapi_client` like any other dependency; **`pyproject.toml`** names the project `openapi_client` and pins runtime deps (`pydantic`, `urllib3`, etc.).
+
+### Agents: where to implement what
+
+- **Networking only** — use `openapi_client`; keep a thin wrapper if you need retries, logging, or env-based `host`.
+- **Board semantics, legality, AI** — **outside** this package; the OpenAPI spec does not fix field names inside `board` or the exact strings for `state` / `color` — **discover from the live server** or document samples when building the rule engine.
+
 ## Canonical spec
 
-For request/response shapes and status codes, always prefer **`openapi.yaml`** in the repository root over this prose; `SERVER_API.md` is a shortened mirror for agents.
+For request/response shapes and status codes, always prefer **`openapi.yaml`** in the repository root over this prose; `SERVER_API.md` is a shortened mirror for agents. The **`openapi_client`** package is the typed Python projection of that same spec.
