@@ -1,1 +1,41 @@
-print("Hello, World!")
+import argparse
+import openapi_client
+from openapi_client.rest import ApiException
+from pprint import pprint
+from uuid import UUID
+
+configuration = openapi_client.Configuration(
+    host = "http://172.28.40.187:40000"
+)
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Mühle solver")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run in test mode.",
+    )
+    args = parser.parse_args()
+
+    if args.test:
+        print("Hello, World! (test mode)")
+    else:
+        print("Hello, World!")
+
+    with openapi_client.ApiClient(configuration) as api_client:
+        # Create an instance of the API class
+        api_instance = openapi_client.DefaultApi(api_client)
+        game_id = UUID('126ac6b9-6b89-4d7b-9225-c0b0e3f4faaf') # UUID | 
+        player_name = 'player_1'
+
+        try:
+            # Spieler zum Spiel hinzufügen
+            api_response = api_instance.add_player(game_id, player_name)
+            print("The response of DefaultApi->add_player:\n")
+            pprint(api_response)
+        except ApiException as e:
+            print("Exception when calling DefaultApi->add_player: %s\n" % e)
+
+
+if __name__ == "__main__":
+    main()
