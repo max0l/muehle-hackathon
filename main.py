@@ -335,6 +335,10 @@ def choose_move(
         else:
             db_hits += 1
         score = _payload_to_score(payload)
+        # Scores are from the side-to-move perspective.  After most moves the
+        # side to move flips to the opponent, so negate to get *our* perspective.
+        if next_position.player_to_move != position.player_to_move:
+            score = -score
         ranked_candidates.append(
             SearchCandidate(move=move, payload=payload, score=score, source=source)
         )
