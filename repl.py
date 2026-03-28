@@ -4,25 +4,58 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
+import select
 import sys
 import threading
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from uuid import UUID
 
 import openapi_client
 from openapi_client import DefaultApi
 from openapi_client.rest import ApiException
 
-from game.board_view import colors_from_board_payload, print_board
+from game.board_view import (
+    board_diff_indices,
+    colors_from_board_payload,
+    format_board,
+    print_board,
+)
 from game_client import DEFAULT_API_HOST, join_as_player
 
 POLL_INTERVAL_SINGLE_SEC = 2.0
+
+ALT_SCREEN_ON = "\033[?1049h"
+ALT_SCREEN_OFF = "\033[?1049l"
+CLEAR_AND_HOME = "\033[2J\033[H"
+
+
+@dataclasses.dataclass
+class Situation:
+    game_state_label: str
+    board: dict[int, int]
+    current_color: Optional[str]
+    board_error: Optional[str]
 
 
 def _normalize_api_color(color: str | None) -> str | None:
     if color is None:
         return None
     return color.strip().lower()
+
+
+def _normalize_board(colors: Mapping[int, int]) -> dict[int, int]:
+    return {i: int(colors.get(i, 0)) for i in range(24)}
+
+
+def _situation_display_key(sit: Situation) -> tuple[Any, ...]:
+    """Stable key for everything the TUI shows from ``fetch_situation`` (not only the board)."""
+    return (
+        sit.game_state_label,
+        sit.current_color,
+        sit.board_error,
+        tuple(sit.board[i] for i in range(24)),
+    )
 
 
 def infer_our_color_from_player_name(player_name: str) -> Optional[str]:
@@ -57,7 +90,10 @@ def _prompt_int_choice(prompt: str, valid: set[int]) -> int:
 
 
 def run_interactive_wizard(host: str) -> tuple[UUID, bool, str, Optional[str]]:
-    """Returns (game_id, single_mode, player_name_for_join, our_color or None for dual)."""
+    """Returns (game_id, single_mode, player_name, our_color or None for dual).
+
+    In single-seat mode, color is fixed: create → white, join → black.
+    """
     print("Mühle REPL — interactive setup\n")
     mode = _prompt_int_choice(
         "Play mode — 1 = both players on this machine (local two-player), "
@@ -91,11 +127,8 @@ def run_interactive_wizard(host: str) -> tuple[UUID, bool, str, Optional[str]]:
     if not single_mode:
         return game_id, False, "", None
 
-    seat = _prompt_int_choice(
-        "Your seat — 1 = White, 2 = Black: ",
-        {1, 2},
-    )
-    player_name = "white" if seat == 1 else "black"
+    # Single seat: creator plays white, joiner plays black (no manual choice).
+    player_name = "white" if cj == 1 else "black"
     return game_id, True, player_name, player_name
 
 
@@ -113,28 +146,112 @@ def repl_move_help(single_mode: bool) -> str:
     )
 
 
-def print_situation(
+def fetch_situation(
+    api: DefaultApi,
+    game_id: UUID,
+    *,
+    api_lock: Optional[threading.Lock] = None,
+) -> Situation:
+    lock_cm = api_lock if api_lock is not None else contextlib.nullcontext()
+    with lock_cm:
+        game_state = api.get_game_state(game_id)
+        state_label = repr(game_state.state)
+        current = api.get_current_player(game_id)
+        cur = _normalize_api_color(current.color)
+        board_err: Optional[str] = None
+        board_norm = _normalize_board({})
+        try:
+            board_resp = api.get_board(game_id)
+            board_obj = board_resp.board if isinstance(board_resp.board, dict) else None
+            cols = colors_from_board_payload(board_obj)
+            board_norm = _normalize_board(cols)
+        except ApiException as exc:
+            board_err = f"{exc.status} {exc.reason}"
+            if exc.body:
+                board_err = f"{board_err} — {exc.body}"
+    return Situation(
+        game_state_label=state_label,
+        board=board_norm,
+        current_color=cur,
+        board_error=board_err,
+    )
+
+
+def print_situation_from(sit: Situation) -> None:
+    print(f"Game state (API): {sit.game_state_label}")
+    if sit.board_error:
+        print(f"Board: could not load ({sit.board_error})", file=sys.stderr)
+    else:
+        print("Board (GET /board):")
+        print_board(sit.board)
+    print(f"Player to move (API): {sit.current_color!r}")
+
+
+def print_situation_scroll(
     api: DefaultApi,
     game_id: UUID,
     *,
     api_lock: Optional[threading.Lock] = None,
 ) -> None:
-    lock_cm = api_lock if api_lock is not None else contextlib.nullcontext()
-    with lock_cm:
-        game_state = api.get_game_state(game_id)
-        print(f"Game state (API): {game_state.state!r}")
-        try:
-            board_resp = api.get_board(game_id)
-            board_obj = board_resp.board if isinstance(board_resp.board, dict) else None
-            colors = colors_from_board_payload(board_obj)
-            print("Board (GET /board):")
-            print_board(colors)
-        except ApiException as exc:
-            print(f"Board: could not load ({exc.status} {exc.reason})", file=sys.stderr)
-            if exc.body:
-                print(exc.body, file=sys.stderr)
-        current = api.get_current_player(game_id)
-        print(f"Player to move (API): {current.color!r}")
+    sit = fetch_situation(api, game_id, api_lock=api_lock)
+    print_situation_from(sit)
+
+
+def build_static_header(
+    game_id: UUID,
+    host: str,
+    *,
+    single_mode: bool,
+    our_color: Optional[str],
+) -> list[str]:
+    lines = [
+        "Mühle REPL",
+        f"Game ID:   {game_id}",
+        f"API host:  {host}",
+    ]
+    if single_mode:
+        oc = our_color or "?"
+        opp = "black" if oc == "white" else "white"
+        lines.append(f"Mode:      Single seat — you: {oc}, opponent: {opp}")
+    else:
+        lines.append("Mode:      Local two-player — this client: white + black")
+    return lines
+
+
+def render_tui_frame(
+    *,
+    static_lines: list[str],
+    sit: Situation,
+    prev_board: Optional[Mapping[int, int]],
+    help_text: str,
+    notice: str = "",
+) -> None:
+    hi = board_diff_indices(prev_board, sit.board)
+    rows: list[str] = [CLEAR_AND_HOME]
+    rows.append("─" * 42)
+    rows.extend(static_lines)
+    rows.append("─" * 42)
+    rows.append(f"Game state: {sit.game_state_label}")
+    cc = sit.current_color or "?"
+    rows.append(f"Turn:       {cc!r}")
+    if notice:
+        rows.append(notice)
+    rows.append("")
+    if sit.board_error:
+        rows.append(f"Board: (error) {sit.board_error}")
+    else:
+        rows.append("Board:")
+        rows.extend(format_board(sit.board, hi).split("\n"))
+    rows.append("")
+    rows.extend(help_text.split("\n"))
+    rows.append(
+        "Tip: red marks fields that changed since the previous view "
+        "(e.g. the opponent's last move).",
+    )
+    rows.append("")
+    rows.append("muehle> ")
+    sys.stdout.write("\n".join(rows))
+    sys.stdout.flush()
 
 
 def parse_command(line: str, *, single_mode: bool) -> Optional[tuple[Any, ...]]:
@@ -220,7 +337,7 @@ def _poll_current_player_loop(
     *,
     initially_our_turn: bool,
 ) -> None:
-    """Background poll: when it becomes our turn, print board/state and prompt."""
+    """Background poll (non-TUI): when it becomes our turn, print board/state."""
     notified = initially_our_turn
     while True:
         if stop.wait(timeout=POLL_INTERVAL_SINGLE_SEC):
@@ -233,7 +350,8 @@ def _poll_current_player_loop(
             if is_us:
                 if not notified:
                     with api_lock:
-                        print_situation(api, game_id, api_lock=None)
+                        sit_poll = fetch_situation(api, game_id, api_lock=None)
+                    print_situation_from(sit_poll)
                     print("You are on the move:", flush=True)
                     notified = True
             else:
@@ -246,6 +364,7 @@ def run_repl_session(
     api: DefaultApi,
     game_id: UUID,
     *,
+    host: str,
     secrets: Optional[dict[str, str]],
     single_secret: Optional[str],
     single_mode: bool,
@@ -254,8 +373,17 @@ def run_repl_session(
     api_lock: Optional[threading.Lock] = threading.Lock() if single_mode else None
     stop_poll = threading.Event()
     poll_thread: Optional[threading.Thread] = None
+    help_text = repl_move_help(single_mode)
 
-    if single_mode and our_color:
+    use_tui = sys.stdout.isatty() and sys.stdin.isatty()
+    poll_fetch = (
+        use_tui
+        and single_mode
+        and bool(our_color)
+        and sys.platform != "win32"
+    )
+
+    if single_mode and our_color and not poll_fetch:
         assert api_lock is not None
         with api_lock:
             cur = api.get_current_player(game_id)
@@ -268,18 +396,101 @@ def run_repl_session(
         )
         poll_thread.start()
 
-    print_situation(api, game_id, api_lock=api_lock)
-    help_text = repl_move_help(single_mode)
-    print(help_text)
+    static_header = build_static_header(
+        game_id,
+        host,
+        single_mode=single_mode,
+        our_color=our_color,
+    )
+
+    def lock_ctx():
+        return api_lock if api_lock is not None else contextlib.nullcontext()
+
     try:
+        if use_tui:
+            sys.stdout.write(ALT_SCREEN_ON)
+            sys.stdout.flush()
+
+        prev_board: Optional[dict[int, int]] = None
+        last_rendered_sit: Optional[Situation] = None
+
+        def paint(
+            sit: Situation,
+            before: Optional[dict[int, int]],
+            notice: str = "",
+            *,
+            show_help: bool,
+        ) -> None:
+            nonlocal prev_board, last_rendered_sit
+            if use_tui:
+                render_tui_frame(
+                    static_lines=static_header,
+                    sit=sit,
+                    prev_board=before,
+                    help_text=help_text,
+                    notice=notice,
+                )
+            else:
+                print_situation_from(sit)
+                if show_help:
+                    print(help_text)
+            prev_board = dict(sit.board)
+            last_rendered_sit = sit
+
+        with lock_ctx():
+            sit0 = fetch_situation(api, game_id, api_lock=None)
+        paint(sit0, None, "", show_help=True)
+
         while True:
-            try:
-                line = input("muehle> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
+            line = ""
+            input_interrupted = False
+            while True:
+                try:
+                    if use_tui and poll_fetch:
+                        ready, _, _ = select.select(
+                            [sys.stdin],
+                            [],
+                            [],
+                            POLL_INTERVAL_SINGLE_SEC,
+                        )
+                        if not ready:
+                            with lock_ctx():
+                                sit_idle = fetch_situation(api, game_id, api_lock=None)
+                            if (
+                                last_rendered_sit is not None
+                                and _situation_display_key(sit_idle)
+                                == _situation_display_key(last_rendered_sit)
+                            ):
+                                continue
+                            notice = ""
+                            if (
+                                our_color
+                                and sit_idle.current_color == our_color
+                                and prev_board is not None
+                            ):
+                                notice = "You are on the move."
+                            paint(sit_idle, prev_board, notice, show_help=True)
+                            continue
+                    line = (
+                        sys.stdin.readline()
+                        if use_tui
+                        else input("muehle> ")
+                    )
+                    if use_tui and line == "":
+                        input_interrupted = True
+                    break
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    input_interrupted = True
+                    break
+            if input_interrupted:
                 break
+
+            raw = line.strip()
+            if not raw:
+                continue
             try:
-                parsed = parse_command(line, single_mode=single_mode)
+                parsed = parse_command(raw, single_mode=single_mode)
             except ValueError as exc:
                 print(f"Parse error: {exc}", file=sys.stderr)
                 continue
@@ -288,10 +499,22 @@ def run_repl_session(
             if parsed[0] == "quit":
                 break
             if parsed[0] == "help":
-                print(help_text)
+                if use_tui:
+                    with lock_ctx():
+                        sit = fetch_situation(api, game_id, api_lock=None)
+                    paint(sit, prev_board, "", show_help=True)
+                else:
+                    print(help_text)
                 continue
             if parsed[0] == "refresh":
-                print_situation(api, game_id, api_lock=api_lock)
+                with lock_ctx():
+                    sit = fetch_situation(api, game_id, api_lock=None)
+                if use_tui:
+                    paint(sit, prev_board, "", show_help=True)
+                else:
+                    print_situation_from(sit)
+                    prev_board = dict(sit.board)
+                    last_rendered_sit = sit
                 continue
             try:
                 run_submit_move(
@@ -307,11 +530,16 @@ def run_repl_session(
                 if exc.body:
                     print(exc.body, file=sys.stderr)
                 continue
-            print_situation(api, game_id, api_lock=api_lock)
+            with lock_ctx():
+                sit = fetch_situation(api, game_id, api_lock=None)
+            paint(sit, prev_board, "", show_help=use_tui)
     finally:
         stop_poll.set()
         if poll_thread is not None:
             poll_thread.join(timeout=POLL_INTERVAL_SINGLE_SEC + 1.0)
+        if use_tui:
+            sys.stdout.write(ALT_SCREEN_OFF)
+            sys.stdout.flush()
 
 
 def main() -> None:
@@ -398,6 +626,7 @@ def main() -> None:
                 run_repl_session(
                     api,
                     game_id,
+                    host=host,
                     secrets=None,
                     single_secret=joined.secret,
                     single_mode=True,
@@ -415,6 +644,7 @@ def main() -> None:
                 run_repl_session(
                     api,
                     game_id,
+                    host=host,
                     secrets={"white": white.secret, "black": black.secret},
                     single_secret=None,
                     single_mode=False,
