@@ -93,14 +93,6 @@ class Board:
         self.board = [0] * 24
         self.state: GameState = "placing"
 
-    def random_move(self) -> Move:
-        return Move(
-            type="place",
-            fieldIndex=random.randint(0, 23),
-            toFieldIndex=None,
-            removedPiece=None,
-        )
-
     def all_moves(self, player: int) -> list[Move]:
         moves = []
         if self.state == "placing":
