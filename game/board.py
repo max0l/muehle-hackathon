@@ -1,8 +1,9 @@
 import dataclasses
-import random
 from typing import Literal
 
-GameState = Literal["placing", "moving", "end"]
+# TODO update with real values
+GameState = Literal["placing", "moving"]
+Player = Literal[1, 2]
 
 # Board layout:
 #
@@ -93,22 +94,95 @@ class Board:
         self.board = [0] * 24
         self.state: GameState = "placing"
 
-    def all_moves(self, player: int) -> list[Move]:
-        moves = []
-        if self.state == "placing":
-            for field in range(24):
-                if self.board[field] == 0:
-                    moves.append(
-                        Move(
-                            type="place",
-                            fieldIndex=field,
-                            toFieldIndex=None,
-                            removedPiece=None,
-                        )
-                    )
-                # todo mills
+    def _all_fields_with_state(self, field_state: Player | None) -> list[int]:
+        """Find all fields occupied by the player or empty depending on the argument."""
+        if field_state is None:
+            value = 0
         else:
-            print("not yet implemented")
+            value = int(field_state)
+
+        fields = list()
+        for field in range(24):
+            if self.board[field] == value:
+                fields.append(field)
+
+        return fields
+
+    def _all_fields_outside_mill(self, player: Player) -> list[int]:
+        """Find all fields occupied by the player or empty that are not part of a completed mill."""
+        result = []
+        for field in self._all_fields_with_state(player):
+            in_mill = any(
+                field in (f0, f1, f2)
+                and self.board[f0] == player
+                and self.board[f1] == player
+                and self.board[f2] == player
+                for f0, f1, f2 in MILLS
+            )
+            if not in_mill:
+                result.append(field)
+        return result
+
+    def _forms_mill(
+        self, field: int, player: Player, from_field: int | None = None
+    ) -> bool:
+        """Check if placing/moving player's piece to `field` completes a mill.
+        `from_field` must be provided when moving so the vacated position is excluded."""
+        for f0, f1, f2 in MILLS:
+            if field in (f0, f1, f2):
+                if all(
+                    self.board[f] == player and f != from_field
+                    for f in (f0, f1, f2)
+                    if f != field
+                ):
+                    return True
+        return False
+
+    def _with_removal(self, base: Move, opponent: Player) -> list[Move]:
+        """Expand a mill-forming move into one move per removable opponent piece."""
+        removable = self._all_fields_outside_mill(opponent)
+        if not removable:  # all opponent pieces are in mills — any may be taken
+            removable = self._all_fields_with_state(opponent)
+        return [dataclasses.replace(base, removedPiece=r) for r in removable]
+
+    def all_moves(self, player: Player) -> list[Move]:
+        """Iterate all legal moves"""
+        opponent: Player = 2 if player == 1 else 1
+        moves = []
+
+        if self.state == "placing":
+            # Allow placing stones and removing enemy stones if a mill was completed
+            for field in self._all_fields_with_state(None):
+                base = Move(
+                    type="place", fieldIndex=field, toFieldIndex=None, removedPiece=None
+                )
+                if self._forms_mill(field, player):
+                    moves.extend(self._with_removal(base, opponent))
+                else:
+                    moves.append(base)
+
+        elif self.state == "moving":
+            can_fly = len(self._all_fields_with_state(player)) <= 3
+            empty_fields = self._all_fields_with_state(None)
+
+            for from_field in self._all_fields_with_state(player):
+                to_fields = (
+                    empty_fields
+                    if can_fly
+                    else [f for f in ADJACENCY[from_field] if self.board[f] == 0]
+                )
+                for to_field in to_fields:
+                    base = Move(
+                        type="move",
+                        fieldIndex=from_field,
+                        toFieldIndex=to_field,
+                        removedPiece=None,
+                    )
+                    if self._forms_mill(to_field, player, from_field=from_field):
+                        moves.extend(self._with_removal(base, opponent))
+                    else:
+                        moves.append(base)
+
         return moves
 
     def pretty_print(self) -> str:
