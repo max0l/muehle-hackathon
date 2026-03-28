@@ -215,6 +215,10 @@ def test_make_move_submits_remove_for_removing_state(monkeypatch) -> None:
     ]
 
 
+def test_normalize_game_state_maps_removingstone_to_remove() -> None:
+    assert main._normalize_game_state("RemovingStone") == "remove"
+
+
 def test_arg_parser_accepts_explicit_create_game() -> None:
     parser = main.build_arg_parser()
 

@@ -95,6 +95,8 @@ def _normalize_game_state(game_state: str | None) -> str:
         return "placing"
     if normalized == _SERVER_MOVING_STATE:
         return "moving"
+    if normalized == _SERVER_REMOVING_STATE:
+        return "remove"
     if normalized in _SERVER_WIN_STATES:
         return "end"
     if any(token in normalized for token in ("remove", "take", "schlag")):
