@@ -1,12 +1,12 @@
 import argparse
-import openapi_client
-from openapi_client.rest import ApiException
 from pprint import pprint
 from uuid import UUID
 
-configuration = openapi_client.Configuration(
-    host = "http://172.28.40.187:40000"
-)
+import openapi_client
+from openapi_client.rest import ApiException
+
+configuration = openapi_client.Configuration(host="http://172.28.40.187:40000")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mühle solver")
@@ -36,6 +36,7 @@ def main() -> None:
             game.id, "place", player.secret, field_index="0"
         )
         print(move)
+
 
 if __name__ == "__main__":
     main()
