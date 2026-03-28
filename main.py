@@ -73,7 +73,7 @@ class VerboseApiClient(openapi_client.ApiClient):
             _http_debug.debug("%s %s -> %s", method, url, response_data.status)
             return response_data
 
-POLL_INTERVAL_SEC = 5
+POLL_INTERVAL_SEC = 1
 _SERVER_WAITING_STATE = "waitingforplayers"
 _SERVER_PLACING_STATES = {"placingstone", "puttingstone"}
 _SERVER_MOVING_STATE = "movingstone"

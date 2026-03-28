@@ -4,7 +4,7 @@ import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from game.encoding import decode_position, index_position
 from game.value_codec import ValueCodec
@@ -34,6 +34,9 @@ class PackedStateStore:
         self.codec = codec
         self.page_entries = page_entries
         self.readonly = readonly
+        self._metadata_dirty = False
+        self._page_write_handles: dict[tuple[Path, Path], tuple[BinaryIO, BinaryIO]] = {}
+        self._queue_append_handle: BinaryIO | None = None
         self.path.mkdir(parents=True, exist_ok=True)
         self.subspaces_path = self.path / SUBSPACES_DIR
         self.subspaces_path.mkdir(parents=True, exist_ok=True)
@@ -54,6 +57,22 @@ class PackedStateStore:
 
     def _flush_metadata(self) -> None:
         self.metadata_path.write_text(json.dumps(self.metadata, indent=2, sort_keys=True))
+        self._metadata_dirty = False
+
+    def _mark_metadata_dirty(self) -> None:
+        self._metadata_dirty = True
+
+    def _flush_open_handles(self) -> None:
+        for values_handle, seen_handle in self._page_write_handles.values():
+            values_handle.flush()
+            seen_handle.flush()
+        if self._queue_append_handle is not None:
+            self._queue_append_handle.flush()
+
+    def flush(self) -> None:
+        self._flush_open_handles()
+        if self._metadata_dirty:
+            self._flush_metadata()
 
     def initialize_build(self, metadata: dict[str, Any], reset_queue: bool = False) -> None:
         if not self.metadata:
@@ -97,13 +116,116 @@ class PackedStateStore:
             subspace_path / f"seen.{page_id:08x}.bin",
         )
 
-    def _read_seen(self, seen_path: Path, slot: int) -> bool:
-        if not seen_path.exists():
+    def _read_seen(self, seen_path: Path, slot: int, handle: BinaryIO | None = None) -> bool:
+        if handle is None and not seen_path.exists():
             return False
-        with seen_path.open("rb") as handle:
-            handle.seek(slot)
-            raw = handle.read(1)
+        if handle is None:
+            with seen_path.open("rb") as handle:
+                handle.seek(slot)
+                raw = handle.read(1)
+            return raw == b"\x01"
+
+        handle.flush()
+        handle.seek(slot)
+        raw = handle.read(1)
         return raw == b"\x01"
+
+    def _ensure_writable(self) -> None:
+        if self.readonly:
+            raise RuntimeError("PackedStateStore is readonly")
+
+    def _get_page_write_handles(self, values_path: Path, seen_path: Path) -> tuple[BinaryIO, BinaryIO]:
+        self._ensure_writable()
+        key = (values_path, seen_path)
+        handles = self._page_write_handles.get(key)
+        if handles is None:
+            self._ensure_page_files(values_path, seen_path)
+            handles = (values_path.open("r+b"), seen_path.open("r+b"))
+            self._page_write_handles[key] = handles
+        return handles
+
+    def _add_state_no_flush(self, position_key: bytes, value: object) -> bool:
+        position = decode_position(position_key)
+        subspace, index = index_position(position)
+        page_id, slot = divmod(index, self.page_entries)
+        values_path, seen_path = self._page_paths(subspace, page_id)
+        values_handle, seen_handle = self._get_page_write_handles(values_path, seen_path)
+        if self._read_seen(seen_path, slot, handle=seen_handle):
+            return False
+
+        values_handle.seek(slot * self.codec.payload_size)
+        values_handle.write(self.codec.encode(value))
+        seen_handle.seek(slot)
+        seen_handle.write(b"\x01")
+
+        self.metadata["entry_count"] = self.entry_count() + 1
+        self._mark_metadata_dirty()
+        return True
+
+    def add_states(
+        self,
+        entries: list[tuple[bytes, object]],
+        *,
+        max_new_entries: int | None = None,
+    ) -> list[bool]:
+        inserted: list[bool] = []
+        new_entries = 0
+        for position_key, value in entries:
+            if max_new_entries is not None and new_entries >= max_new_entries:
+                inserted.append(False)
+                continue
+            was_added = self._add_state_no_flush(position_key, value)
+            inserted.append(was_added)
+            if was_added:
+                new_entries += 1
+        self.flush()
+        return inserted
+
+    def _get_queue_append_handle(self) -> BinaryIO:
+        self._ensure_writable()
+        if self._queue_append_handle is None:
+            self._queue_append_handle = self.queue_path.open("ab")
+        return self._queue_append_handle
+
+    def enqueue_many(self, entries: list[tuple[bytes, int]]) -> int:
+        tail = int(self.metadata.get("frontier_tail", 0))
+        if not entries:
+            return tail
+        handle = self._get_queue_append_handle()
+        for position_key, depth in entries:
+            handle.write(struct.pack(">I", depth))
+            handle.write(position_key)
+        self.metadata["frontier_tail"] = tail + len(entries)
+        self._mark_metadata_dirty()
+        self.flush()
+        return tail
+
+    def close(self) -> None:
+        self.flush()
+        for values_handle, seen_handle in self._page_write_handles.values():
+            values_handle.close()
+            seen_handle.close()
+        self._page_write_handles.clear()
+        if self._queue_append_handle is not None:
+            self._queue_append_handle.close()
+            self._queue_append_handle = None
+
+    def __enter__(self) -> "PackedStateStore":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def add_state(self, position_key: bytes, value: object) -> bool:
+        was_added = self._add_state_no_flush(position_key, value)
+        self.flush()
+        return was_added
 
     def _ensure_page_files(self, values_path: Path, seen_path: Path) -> None:
         if not values_path.exists():
@@ -112,26 +234,6 @@ class PackedStateStore:
         if not seen_path.exists():
             with seen_path.open("wb") as handle:
                 handle.truncate(self.page_entries)
-
-    def add_state(self, position_key: bytes, value: object) -> bool:
-        position = decode_position(position_key)
-        subspace, index = index_position(position)
-        page_id, slot = divmod(index, self.page_entries)
-        values_path, seen_path = self._page_paths(subspace, page_id)
-        self._ensure_page_files(values_path, seen_path)
-        if self._read_seen(seen_path, slot):
-            return False
-
-        with values_path.open("r+b") as values_handle:
-            values_handle.seek(slot * self.codec.payload_size)
-            values_handle.write(self.codec.encode(value))
-        with seen_path.open("r+b") as seen_handle:
-            seen_handle.seek(slot)
-            seen_handle.write(b"\x01")
-
-        self.metadata["entry_count"] = self.entry_count() + 1
-        self._flush_metadata()
-        return True
 
     def lookup(self, position) -> object | None:
         subspace, index = index_position(position)
@@ -145,13 +247,7 @@ class PackedStateStore:
         return self.codec.decode(raw)
 
     def enqueue(self, position_key: bytes, depth: int) -> int:
-        tail = int(self.metadata.get("frontier_tail", 0))
-        with self.queue_path.open("ab") as handle:
-            handle.write(struct.pack(">I", depth))
-            handle.write(position_key)
-        self.metadata["frontier_tail"] = tail + 1
-        self._flush_metadata()
-        return tail
+        return self.enqueue_many([(position_key, depth)])
 
     def pop_frontier_batch(self, batch_size: int) -> list[FrontierItem]:
         head = int(self.metadata.get("frontier_head", 0))
@@ -170,5 +266,6 @@ class PackedStateStore:
                 items.append(FrontierItem(depth=depth, position_key=raw[4:]))
 
         self.metadata["frontier_head"] = head + len(items)
-        self._flush_metadata()
+        self._mark_metadata_dirty()
+        self.flush()
         return items

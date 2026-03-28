@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from game.board import apply_move, initial_position, is_terminal, legal_moves
-from game.encoding import canonical_key, canonicalize, decode_position
+from game.encoding import canonicalize, decode_position, encode_position
 from game.packed_store import PackedStateStore
 from game.value_codec import ValueMode, get_value_codec
 
@@ -18,6 +20,15 @@ class GenerationResult:
     stored_states: int
     frontier_remaining: int
     stopped_because_of_limit: bool
+
+
+@dataclass(frozen=True)
+class GenerationProgress:
+    processed_frontier_states: int
+    stored_states: int
+    frontier_remaining: int
+    elapsed_seconds: float
+    finished: bool = False
 
 
 def _build_metadata(args: argparse.Namespace) -> dict[str, Any]:
@@ -32,6 +43,64 @@ def _build_metadata(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _expand_frontier_batch(
+    frontier_batch,
+    *,
+    codec,
+    max_depth: int | None,
+) -> tuple[int, list[tuple[bytes, object, int]]]:
+    processed = 0
+    generated: dict[bytes, tuple[object, int]] = {}
+    for item in frontier_batch:
+        processed += 1
+        if max_depth is not None and item.depth >= max_depth:
+            continue
+
+        position = decode_position(item.position_key)
+        if is_terminal(position):
+            continue
+
+        next_depth = item.depth + 1
+        for move in legal_moves(position):
+            next_position = canonicalize(apply_move(position, move))
+            next_key = encode_position(next_position)
+            if next_key in generated:
+                continue
+            generated[next_key] = (codec.evaluate(next_position, next_depth), next_depth)
+
+    return processed, [(key, value, depth) for key, (value, depth) in generated.items()]
+
+
+def _progress_snapshot(
+    *,
+    store: PackedStateStore,
+    processed_frontier_states: int,
+    started_at: float,
+    finished: bool,
+) -> GenerationProgress:
+    return GenerationProgress(
+        processed_frontier_states=processed_frontier_states,
+        stored_states=store.entry_count(),
+        frontier_remaining=store.frontier_size(),
+        elapsed_seconds=time.perf_counter() - started_at,
+        finished=finished,
+    )
+
+
+def _print_progress(progress: GenerationProgress) -> None:
+    line = (
+        "generation: "
+        f"processed={progress.processed_frontier_states} "
+        f"stored={progress.stored_states} "
+        f"frontier={progress.frontier_remaining} "
+        f"elapsed={progress.elapsed_seconds:.1f}s"
+    )
+    if progress.finished:
+        print(f"\r{line}", file=sys.stderr)
+        return
+    print(f"\r{line}", end="", file=sys.stderr, flush=True)
+
+
 def generate_database(
     output_path: str | Path,
     *,
@@ -41,10 +110,12 @@ def generate_database(
     batch_size: int,
     page_entries: int,
     resume: bool,
+    progress_callback: Callable[[GenerationProgress], None] | None = None,
 ) -> GenerationResult:
     output_path = Path(output_path)
     codec = get_value_codec(value_mode)
     store = PackedStateStore(output_path, codec, page_entries=page_entries)
+    started_at = time.perf_counter()
     if store.entry_count() > 0 and not resume:
         raise RuntimeError(f"Database at {output_path} already contains states; use --resume to continue")
 
@@ -61,9 +132,10 @@ def generate_database(
 
     if store.entry_count() == 0:
         start = canonicalize(initial_position())
-        start_key = canonical_key(start)
-        store.add_state(start_key, codec.evaluate(start, 0))
-        store.enqueue(start_key, 0)
+        start_key = encode_position(start)
+        inserted = store.add_states([(start_key, codec.evaluate(start, 0))], max_new_entries=1)
+        if inserted and inserted[0]:
+            store.enqueue_many([(start_key, 0)])
 
     processed = 0
     stop = False
@@ -74,36 +146,58 @@ def generate_database(
         if not frontier_batch:
             break
 
-        for item in frontier_batch:
-            processed += 1
-            if max_depth is not None and item.depth >= max_depth:
-                continue
+        processed_batch, generated = _expand_frontier_batch(
+            frontier_batch,
+            codec=codec,
+            max_depth=max_depth,
+        )
+        processed += processed_batch
+        if not generated:
+            continue
 
-            position = decode_position(item.position_key)
-            if is_terminal(position):
-                continue
-
-            next_depth = item.depth + 1
-            for move in legal_moves(position):
-                next_position = canonicalize(apply_move(position, move))
-                next_key = canonical_key(next_position)
-                if not store.add_state(next_key, codec.evaluate(next_position, next_depth)):
-                    continue
-
-                store.enqueue(next_key, next_depth)
-                if max_states is not None and store.entry_count() >= max_states:
-                    stop = True
-                    break
-
-            if stop:
+        remaining_slots = None
+        if max_states is not None:
+            remaining_slots = max(0, max_states - store.entry_count())
+            if remaining_slots == 0:
+                stop = True
                 break
 
-    return GenerationResult(
+        entries_to_store = [(position_key, value) for position_key, value, _ in generated]
+        inserted = store.add_states(entries_to_store, max_new_entries=remaining_slots)
+        enqueued = [
+            (position_key, depth)
+            for (position_key, _value, depth), was_inserted in zip(generated, inserted)
+            if was_inserted
+        ]
+        store.enqueue_many(enqueued)
+        if progress_callback is not None:
+            progress_callback(
+                _progress_snapshot(
+                    store=store,
+                    processed_frontier_states=processed,
+                    started_at=started_at,
+                    finished=False,
+                )
+            )
+        if max_states is not None and store.entry_count() >= max_states:
+            stop = True
+
+    result = GenerationResult(
         processed_frontier_states=processed,
         stored_states=store.entry_count(),
         frontier_remaining=store.frontier_size(),
         stopped_because_of_limit=stop,
     )
+    if progress_callback is not None:
+        progress_callback(
+            _progress_snapshot(
+                store=store,
+                processed_frontier_states=processed,
+                started_at=started_at,
+                finished=True,
+            )
+        )
+    return result
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -135,6 +229,7 @@ def main() -> None:
         batch_size=args.batch_size,
         page_entries=args.page_entries,
         resume=args.resume,
+        progress_callback=None if args.json else _print_progress,
     )
     if args.json:
         print(json.dumps(asdict(result), indent=2, sort_keys=True))
