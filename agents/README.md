@@ -9,6 +9,7 @@ This folder is **onboarding and reference material for AI coding agents** workin
 | [PROJECT.md](./PROJECT.md) | What the repo is, architecture (client vs server), what belongs in this codebase |
 | [GAME_RULES.md](./GAME_RULES.md) | Nine Men’s Morris rules relevant to logic and move generation |
 | [SERVER_API.md](./SERVER_API.md) | HTTP contract summary (source of truth: `openapi.yaml` at repo root) |
+| [OPENING_BOOK_OPTION_A.md](./OPENING_BOOK_OPTION_A.md) | Plan Option A: Eröffnungsbuch via Negamax/Alpha-Beta, TT, Heuristik, CLI, Tests, offene Regelfragen |
 
 ## Quick facts
 
