@@ -77,6 +77,7 @@ POLL_INTERVAL_SEC = 5
 _SERVER_WAITING_STATE = "waitingforplayers"
 _SERVER_PLACING_STATES = {"placingstone", "puttingstone"}
 _SERVER_MOVING_STATE = "movingstone"
+_SERVER_REMOVING_STATE = "removingstone"
 _SERVER_WIN_STATES = {"winblack", "winwhite"}
 
 
@@ -105,7 +106,7 @@ def _normalize_game_state(game_state: str | None) -> str:
     return "moving"
 
 
-def _classify_server_state(game_state: str | None) -> Literal["waiting", "placing", "moving", "finished", "unknown"]:
+def _classify_server_state(game_state: str | None) -> Literal["waiting", "placing", "moving", "removing", "finished", "unknown"]:
     if not game_state:
         return "unknown"
     normalized = game_state.strip().lower()
@@ -115,6 +116,8 @@ def _classify_server_state(game_state: str | None) -> Literal["waiting", "placin
         return "placing"
     if normalized == _SERVER_MOVING_STATE:
         return "moving"
+    if normalized == _SERVER_REMOVING_STATE:
+        return "removing"
     if normalized in _SERVER_WIN_STATES:
         return "finished"
     return "unknown"
@@ -318,7 +321,7 @@ def make_move(
         return None
 
     move, payload = chosen
-    expected_move_type = {"placing": "place", "moving": "move"}.get(state_kind)
+    expected_move_type = {"placing": "place", "moving": "move", "removing": "remove"}.get(state_kind)
     if expected_move_type is not None and move.type != expected_move_type:
         raise ValueError(
             f"Selected illegal action {move.type!r} for server state {game_state!r}; expected {expected_move_type!r}"
@@ -385,16 +388,24 @@ def game_loop(
         time.sleep(POLL_INTERVAL_SEC)
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Connect to a remote Mühle game: create or join by id, then register a player.",
     )
-    parser.add_argument(
+    start_group = parser.add_mutually_exclusive_group()
+    start_group.add_argument(
+        "--create-game",
+        action="store_true",
+        help="Create a new game explicitly.",
+    )
+    start_group.add_argument(
+        "--join-game",
         "--game-id",
+        dest="join_game_id",
         type=UUID,
         metavar="UUID",
         default=None,
-        help="Existing game id. If omitted, a new game is created.",
+        help="Join an existing game by id. `--game-id` is supported as an alias.",
     )
     parser.add_argument(
         "--player",
@@ -430,6 +441,11 @@ def main() -> None:
         action="store_true",
         help="Log move search status, DB hits/misses, and top candidates to stderr.",
     )
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     if args.verbose:
@@ -451,7 +467,9 @@ def main() -> None:
             )
         with client_cls(configuration) as api_client:
             api = openapi_client.DefaultApi(api_client)
-            game_id = resolve_game_id(api, args.game_id)
+            if args.join_game_id is not None:
+                print(f"Joining game with id: {args.join_game_id}")
+            game_id = resolve_game_id(api, None if args.create_game else args.join_game_id)
             joined = join_as_player(api, game_id, args.player)
             if not joined.secret:
                 print("Server did not return a player secret.", file=sys.stderr)

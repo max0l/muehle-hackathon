@@ -167,3 +167,50 @@ def test_make_move_submits_move_for_moving_state(monkeypatch) -> None:
             "to_field_index": "4",
         }
     ]
+
+
+def test_make_move_submits_remove_for_removing_state(monkeypatch) -> None:
+    selected_move = Move(type="remove", fieldIndex=9, removedPiece=9)
+    monkeypatch.setattr(main, "choose_move", lambda *args, **kwargs: (selected_move, 789))
+    api = RecordingApi()
+    game_id = uuid4()
+
+    submitted = main.make_move(
+        api,
+        game_id,
+        "secret",
+        object(),  # type: ignore[arg-type]
+        {"Fields": [{"Index": 9, "Color": 2}]},
+        1,
+        "RemovingStone",
+    )
+
+    assert submitted == selected_move
+    assert api.calls == [
+        {
+            "game_id": str(game_id),
+            "action": "remove",
+            "secret_code": "secret",
+            "field_index": "9",
+            "to_field_index": None,
+        }
+    ]
+
+
+def test_arg_parser_accepts_explicit_create_game() -> None:
+    parser = main.build_arg_parser()
+
+    args = parser.parse_args(["--create-game", "--color", "white"])
+
+    assert args.create_game is True
+    assert args.join_game_id is None
+
+
+def test_arg_parser_accepts_join_game_alias() -> None:
+    parser = main.build_arg_parser()
+    game_id = uuid4()
+
+    args = parser.parse_args(["--game-id", str(game_id), "--color", "black"])
+
+    assert args.create_game is False
+    assert args.join_game_id == game_id
