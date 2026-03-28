@@ -21,21 +21,27 @@ Build a **client** for **Nine Men’s Morris** that participates in games via an
 | **`openapi_client/`** | **Generated** Python client (OpenAPI Generator, Pydantic). Do not hand-edit; regenerate from the spec. |
 | **`.openapi-generator/`**, **`.openapi-generator-ignore`** | Generator metadata and ignore rules. |
 | **`main.py`** | Application entry (currently wires `Configuration` / `ApiClient` / `DefaultApi`); room to grow into a CLI or game loop. |
-| **`game/board.py`** | Hand-written **24-point** board: `ADJACENCY`, `MILLS`, `Board` (server `Index`/`Color` JSON), `Move`, `all_moves` (placement only for now). See **`agents/README.md`**. |
+| **`game/board.py`** | Hand-written **24-point** board and rules core: immutable `Position`, `Move`, legal move generation, `apply_move()`, terminal detection, plus `Board` wrapper for API payloads. |
+| **`game/encoding.py`** | Symmetry transforms, canonicalization, fixed-width position encoding/decoding, and deterministic per-subspace indexing. |
+| **`game/heuristics.py`** | Phase-aware heuristic evaluation for generated states. |
+| **`game/value_codec.py`** | Payload codecs for packed storage: heuristic, WDL, WDL+depth. |
+| **`game/packed_store.py`** | Packed indexed score/meta/frontier storage on disk. |
+| **`game/generate_db.py`** | CLI to traverse reachable states and persist packed indexed ratings on disk. |
 | **`agents/`** | Agent-oriented docs: project overview (this file), API summary, game rules, opening-book / DB plans, generated-client notes in **`README.md`**. |
 | **`docs/`** | Generated Markdown API reference (mirrors `DefaultApi` and models). |
 | **`test/`** | Generated tests for `openapi_client` (plus any future hand-written tests). |
+| **`tests/`** | Hand-written tests for local game logic, canonical encoding/indexing, and packed generation. |
 | **`pyproject.toml`**, **`setup.py`**, **`requirements.txt`**, **`tox.ini`** | Packaging, dependencies, and test/lint automation. |
 | **`.github/workflows/`** | CI (e.g. Python package / pytest). |
 
-**Started:** **`game/board.py`** holds geometry and a partial move list (placement). **Search, opening books, and full rules** are still to be added.
+**Implemented now:** the repo contains a local full-game rules engine plus a bounded/resumable **packed indexed state generator**. Search and opening-book consumers can now build on these components.
 
 ## Suggested module boundaries (implementation guidance)
 
-- **`game/board.py` (current):** 24 intersections as `list[int]`, `ADJACENCY` / `MILLS`, `Board` from API field list `{ Index, Color }`, `GameState`, `Move`, `all_moves` (incomplete). Prefer growing **`game/`** for rules rather than putting logic inside **`openapi_client/`**.
-- **`rules` / `logic` (next):** Mill closure and `remove` plies, sliding / flying, terminals — extend `Board` or add e.g. `game/rules.py`. Keep server string indices and `state` strings in sync with measurements from the API.
+- **`game/board.py` (current):** full local rules core with immutable `Position`, `Move`, placement / movement / removal / flying, mill checks, and terminal detection. Keep server string indices and `state` strings in sync with measurements from the API.
+- **`game/encoding.py` / `game/value_codec.py` / `game/packed_store.py` / `game/generate_db.py`:** offline state enumeration, symmetry normalization, packed indexed persistence, and configurable payload generation. This is the foundation for lookup-backed search.
 - **HTTP:** Use **`openapi_client`** for all Mühle REST calls. Add only a **thin wrapper** (retries, logging, env-based `host`) if needed — do not fork the generated client.
-- **`ai` / `search`:** Planners using the rule engine (heuristic evaluation + search). Keep I/O separate so the same brain can run offline tests.
+- **`ai` / `search`:** Planners using the rule engine and optional packed lookup data. Keep I/O separate so the same brain can run offline tests.
 
 ## Configuration
 
@@ -44,7 +50,7 @@ Build a **client** for **Nine Men’s Morris** that participates in games via an
 ## Language / stack
 
 - **Python** (see **`pyproject.toml`**: `requires-python >= 3.9`, **Pydantic** v2, **urllib3**).
-- **Tests:** **pytest** / **tox** with coverage over **`openapi_client`**.
+- **Tests:** **pytest** / **tox** with coverage over **`openapi_client`** and **`game`**.
 - **Regeneration:** After changing **`openapi.yaml`**, rerun OpenAPI Generator so **`openapi_client/`** and **`test/`** stay in sync.
 
 For details on the generated client’s classes and methods, see **`agents/README.md`** (section *Generated OpenAPI Python client*).

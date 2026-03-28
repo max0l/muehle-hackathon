@@ -29,4 +29,6 @@ Use this when coding **move generation** and **evaluation**. Exact edge cases mu
 
 - **Field indexing:** The API uses string indices (`fieldIndex`, `toFieldIndex`). The repo’s canonical **integer** labeling **`0…23`** and line sets are defined in **[`game/board.py`](../game/board.py)** (`ADJACENCY`, `MILLS`, ASCII diagram in-source). Convert strings ↔ ints at the HTTP boundary.
 - **Board payload:** `Board` expects server fields **`Index`** and **`Color`** (ints); empty=`0`, white=`1`, black=`2` — confirm against your server.
-- **Actions:** The HTTP API exposes `place`, `move`, and `remove` — align with **`Move.type`** and `GameState` in `game/board.py` as logic grows.
+- **Actions:** The HTTP API exposes `place`, `move`, and `remove` — these align with **`Move.type`** in `game/board.py`.
+- **Local phases:** The local engine uses `placing`, `moving`, `flying`, `remove`, `end`. `remove` is an explicit intermediate state after a mill is closed; map server `state` strings onto this model carefully.
+- **Offline DB generation:** Canonical state indexing and packed on-disk values are implemented in **[`game/encoding.py`](../game/encoding.py)**, **[`game/value_codec.py`](../game/value_codec.py)**, **[`game/packed_store.py`](../game/packed_store.py)**, and **[`game/generate_db.py`](../game/generate_db.py)**.

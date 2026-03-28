@@ -72,7 +72,23 @@ python setup.py install --user
 pytest
 ```
 
-(With coverage, as in CI / `tox.ini`: `pytest --cov=openapi_client`.)
+(With coverage, as in CI / `tox.ini`: `pytest --cov=openapi_client --cov=game`.)
+
+## Packed state database
+
+The repo includes a local offline generator for packed indexed state files:
+
+```sh
+python3 -m game.generate_db --output state_db.packed --value-mode heuristic --max-depth 4 --max-states 10000 --json
+```
+
+Supported payload modes:
+
+- `heuristic`
+- `wdl`
+- `wdl-depth`
+
+The rules engine, canonical indexing, codecs, and packed storage live under `game/`.
 
 ## Getting started
 
