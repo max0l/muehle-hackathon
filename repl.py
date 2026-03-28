@@ -13,7 +13,7 @@ import openapi_client
 from openapi_client import DefaultApi
 from openapi_client.rest import ApiException
 
-from game.board_view import colors_from_board_payload, format_board_diagram
+from game.board_view import colors_from_board_payload, print_board
 from game_client import DEFAULT_API_HOST, join_as_player
 
 POLL_INTERVAL_SINGLE_SEC = 2.0
@@ -128,7 +128,7 @@ def print_situation(
             board_obj = board_resp.board if isinstance(board_resp.board, dict) else None
             colors = colors_from_board_payload(board_obj)
             print("Board (GET /board):")
-            print(format_board_diagram(colors))
+            print_board(colors)
         except ApiException as exc:
             print(f"Board: could not load ({exc.status} {exc.reason})", file=sys.stderr)
             if exc.body:
