@@ -1,0 +1,226 @@
+openapi: 3.0.3
+info:
+  title: Mühle HTTP API
+  description: |
+    REST-Schnittstelle für die Mühle-Spielsession. Spiel anlegen, Spieler
+    registrieren, Züge ausführen, Brett und Zustand lesen.
+    Pro Server-Prozess können beliebig viele Partien parallel laufen; jede Partie
+    hat eine eigene `gameId` (UUID), alle Aktionen sind pro Partie isoliert.
+  version: 1.0.0
+
+servers:
+  - url: http://172.28.40.187:40000
+    description: Lokaler Dev-Server
+
+paths:
+  /openapi.yaml:
+    get:
+      summary: OpenAPI-Spezifikation (diese Datei)
+      operationId: getOpenAPISpec
+      responses:
+        "200":
+          description: OpenAPI 3.0 Dokument (YAML)
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /games:
+    post:
+      summary: Neues Spiel anlegen
+      description: |
+        Erzeugt eine neue Partie. Mehrfaches Aufrufen legt mehrere unabhängige
+        Spiele an (jeweils neue UUID in der Antwort).
+      operationId: createGame
+      responses:
+        "201":
+          description: Spiel erzeugt
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message, id]
+                properties:
+                  message:
+                    type: string
+                    example: Game created
+                  id:
+                    type: string
+                    format: uuid
+        "500":
+          description: Serverfehler
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /games/{gameId}/players:
+    post:
+      summary: Spieler zum Spiel hinzufügen
+      operationId: addPlayer
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [playerName]
+              properties:
+                playerName:
+                  type: string
+      responses:
+        "200":
+          description: Spieler hinzugefügt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  secret:
+                    type: string
+                    description: Geheimcode für Züge
+        "404":
+          $ref: "#/components/responses/GameNotFound"
+        "500":
+          description: z. B. Spiel voll
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /games/{gameId}/moves:
+    post:
+      summary: Zug ausführen (setzen, ziehen, entfernen)
+      operationId: submitMove
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [action, secretCode]
+              properties:
+                action:
+                  type: string
+                  enum: [place, move, remove]
+                secretCode:
+                  type: string
+                fieldIndex:
+                  type: string
+                  description: Bei place/remove Quell-/Zielfeld; bei move Startfeld
+                toFieldIndex:
+                  type: string
+                  description: Nur bei action=move
+      responses:
+        "200":
+          description: Zug akzeptiert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Stone moved
+        "400":
+          description: Ungültige action oder fehlende Felder
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/GameNotFound"
+        "500":
+          description: Regelverletzung o. Ä.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /games/{gameId}/state:
+    get:
+      summary: Spielphase abfragen
+      operationId: getGameState
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state:
+                    type: string
+        "404":
+          $ref: "#/components/responses/GameNotFound"
+
+  /games/{gameId}/current-player:
+    get:
+      summary: Farbe des aktuellen Spielers
+      operationId: getCurrentPlayer
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  color:
+                    type: string
+                    example: White
+        "404":
+          $ref: "#/components/responses/GameNotFound"
+
+  /games/{gameId}/board:
+    get:
+      summary: Brett mit Feldern
+      operationId: getBoard
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  board:
+                    type: object
+        "404":
+          $ref: "#/components/responses/GameNotFound"
+
+components:
+  parameters:
+    gameId:
+      name: gameId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+  responses:
+    GameNotFound:
+      description: Unbekanntes oder ungültiges Spiel
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: game not found
