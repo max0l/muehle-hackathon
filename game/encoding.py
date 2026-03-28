@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from math import comb
 import struct
 
@@ -172,6 +173,34 @@ def index_position(position: Position) -> tuple[str, int]:
     rank_black = _rank_combination(reduced_black, len(remaining_positions))
     black_multiplier = comb(len(remaining_positions), len(black_positions))
     return subspace_id(canonical), rank_white * black_multiplier + rank_black
+
+
+def page_locator(position: Position, page_entries: int) -> tuple[str, int, int]:
+    subspace, index = index_position(position)
+    page_id, slot = divmod(index, page_entries)
+    return subspace, page_id, slot
+
+
+def page_locator_from_key(position_key: bytes, page_entries: int) -> tuple[str, int, int]:
+    return page_locator(decode_position(position_key), page_entries)
+
+
+def owner_shard_for_page(subspace: str, page_id: int, shard_count: int) -> int:
+    if shard_count <= 1:
+        return 0
+    key = f"{subspace}:{page_id}".encode("utf-8")
+    digest = hashlib.blake2b(key, digest_size=8).digest()
+    return int.from_bytes(digest, "big") % shard_count
+
+
+def owner_shard_for_position(position: Position, page_entries: int, shard_count: int) -> int:
+    subspace, page_id, _slot = page_locator(position, page_entries)
+    return owner_shard_for_page(subspace, page_id, shard_count)
+
+
+def owner_shard_for_key(position_key: bytes, page_entries: int, shard_count: int) -> int:
+    subspace, page_id, _slot = page_locator_from_key(position_key, page_entries)
+    return owner_shard_for_page(subspace, page_id, shard_count)
 
 
 def subspace_capacity(position: Position) -> int:

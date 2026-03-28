@@ -6,13 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from game.encoding import decode_position, index_position
+from game.encoding import decode_position, index_position, owner_shard_for_position
 from game.value_codec import ValueCodec
 
 QUEUE_RECORD_SIZE = 32
 META_FILE = "metadata.json"
 QUEUE_FILE = "frontier.bin"
 SUBSPACES_DIR = "subspaces"
+SHARDS_DIR = "shards"
+FORMAT_VERSION_V1 = 1
+FORMAT_VERSION_V2 = 2
 
 
 @dataclass
@@ -34,17 +37,32 @@ class PackedStateStore:
         self.codec = codec
         self.page_entries = page_entries
         self.readonly = readonly
+        self.shard_count = 1
+        self.shard_id: int | None = None
+        self.format_version = FORMAT_VERSION_V1
+        self._is_sharded_root = False
         self._metadata_dirty = False
         self._page_write_handles: dict[tuple[Path, Path], tuple[BinaryIO, BinaryIO]] = {}
         self._queue_append_handle: BinaryIO | None = None
         self.path.mkdir(parents=True, exist_ok=True)
         self.subspaces_path = self.path / SUBSPACES_DIR
         self.subspaces_path.mkdir(parents=True, exist_ok=True)
+        self.shards_path = self.path / SHARDS_DIR
         self.queue_path = self.path / QUEUE_FILE
         self.metadata_path = self.path / META_FILE
         self.metadata: dict[str, Any] = {}
         if self.metadata_path.exists():
             self.metadata = json.loads(self.metadata_path.read_text())
+            metadata_format_version = self.metadata.get("format_version")
+            if isinstance(metadata_format_version, int):
+                self.format_version = metadata_format_version
+            metadata_shard_count = self.metadata.get("shard_count")
+            if isinstance(metadata_shard_count, int) and metadata_shard_count > 1:
+                self.shard_count = metadata_shard_count
+            metadata_shard_id = self.metadata.get("shard_id")
+            if isinstance(metadata_shard_id, int):
+                self.shard_id = metadata_shard_id
+            self._is_sharded_root = self.shard_count > 1 and self.shard_id is None
             metadata_page_entries = self.metadata.get("page_entries")
             if isinstance(metadata_page_entries, int):
                 self.page_entries = metadata_page_entries
@@ -102,11 +120,42 @@ class PackedStateStore:
     def get_metadata(self) -> dict[str, Any]:
         return dict(self.metadata.get("build_info", {}))
 
+    def _shard_metadata_paths(self) -> list[Path]:
+        if self.shard_count <= 1:
+            return []
+        return [self.shards_path / f"{shard_id:04d}" / META_FILE for shard_id in range(self.shard_count)]
+
+    def _aggregate_shard_metric(self, key: str) -> int:
+        total = 0
+        for metadata_path in self._shard_metadata_paths():
+            if not metadata_path.exists():
+                continue
+            metadata = json.loads(metadata_path.read_text())
+            total += int(metadata.get(key, 0))
+        return total
+
     def entry_count(self) -> int:
+        if self._is_sharded_root and self.shard_count > 1:
+            if "entry_count" in self.metadata:
+                return int(self.metadata.get("entry_count", 0))
+            return self._aggregate_shard_metric("entry_count")
         return int(self.metadata.get("entry_count", 0))
 
     def frontier_size(self) -> int:
+        if self._is_sharded_root and self.shard_count > 1:
+            if "frontier_size" in self.metadata:
+                return int(self.metadata.get("frontier_size", 0))
+            total = 0
+            for metadata_path in self._shard_metadata_paths():
+                if not metadata_path.exists():
+                    continue
+                metadata = json.loads(metadata_path.read_text())
+                total += int(metadata.get("frontier_tail", 0)) - int(metadata.get("frontier_head", 0))
+            return total
         return int(self.metadata.get("frontier_tail", 0)) - int(self.metadata.get("frontier_head", 0))
+
+    def shard_path(self, shard_id: int) -> Path:
+        return self.shards_path / f"{shard_id:04d}"
 
     def _page_paths(self, subspace: str, page_id: int) -> tuple[Path, Path]:
         subspace_path = self.subspaces_path / subspace
@@ -236,6 +285,10 @@ class PackedStateStore:
                 handle.truncate(self.page_entries)
 
     def lookup(self, position) -> object | None:
+        if self._is_sharded_root and self.shard_count > 1:
+            shard_id = owner_shard_for_position(position, self.page_entries, self.shard_count)
+            shard_store = PackedStateStore(self.shard_path(shard_id), self.codec, page_entries=self.page_entries, readonly=True)
+            return shard_store.lookup(position)
         subspace, index = index_position(position)
         page_id, slot = divmod(index, self.page_entries)
         values_path, seen_path = self._page_paths(subspace, page_id)

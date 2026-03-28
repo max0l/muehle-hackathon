@@ -1,6 +1,8 @@
+import json
+
 from game.generate_db import generate_database
 from game.board import apply_move, initial_position, legal_moves
-from game.encoding import canonical_key
+from game.encoding import canonical_key, owner_shard_for_key
 from game.packed_store import PackedStateStore
 from game.value_codec import get_value_codec
 
@@ -146,3 +148,99 @@ def test_generate_database_reports_progress(tmp_path) -> None:
     assert snapshots[-1].processed_frontier_states == result.processed_frontier_states
     assert snapshots[-1].stored_states == result.stored_states
     assert snapshots[-1].frontier_remaining == result.frontier_remaining
+
+
+def test_owner_shard_for_key_is_deterministic() -> None:
+    root = initial_position()
+    first_move = legal_moves(root)[0]
+    first_child = apply_move(root, first_move)
+    key = canonical_key(first_child)
+
+    assert owner_shard_for_key(key, 64, 4) == owner_shard_for_key(key, 64, 4)
+
+
+def test_generate_database_parallel_shards_writes_lookupable_store(tmp_path) -> None:
+    output = tmp_path / "state_db_parallel"
+
+    result = generate_database(
+        output,
+        value_mode="heuristic",
+        max_depth=2,
+        max_states=200,
+        batch_size=4,
+        page_entries=64,
+        resume=False,
+        shard_count=2,
+    )
+
+    metadata = json.loads((output / "metadata.json").read_text())
+    store = PackedStateStore(output, get_value_codec("heuristic"), page_entries=64, readonly=True)
+
+    assert metadata["format_version"] == 2
+    assert metadata["shard_count"] == 2
+    assert result.stored_states == metadata["entry_count"]
+    assert store.lookup(initial_position()) is not None
+
+
+def test_generate_database_parallel_resume_continues_work(tmp_path) -> None:
+    output = tmp_path / "state_db_parallel_resume"
+
+    first = generate_database(
+        output,
+        value_mode="heuristic",
+        max_depth=2,
+        max_states=8,
+        batch_size=4,
+        page_entries=64,
+        resume=False,
+        shard_count=2,
+    )
+    second = generate_database(
+        output,
+        value_mode="heuristic",
+        max_depth=2,
+        max_states=40,
+        batch_size=4,
+        page_entries=64,
+        resume=True,
+        shard_count=2,
+    )
+
+    assert first.stopped_because_of_limit is True
+    assert second.stored_states > first.stored_states
+
+
+def test_generate_database_parallel_matches_single_process_small_run(tmp_path) -> None:
+    output_single = tmp_path / "state_db_single"
+    output_parallel = tmp_path / "state_db_parallel_match"
+
+    single = generate_database(
+        output_single,
+        value_mode="heuristic",
+        max_depth=2,
+        max_states=500,
+        batch_size=8,
+        page_entries=64,
+        resume=False,
+        shard_count=1,
+    )
+    parallel = generate_database(
+        output_parallel,
+        value_mode="heuristic",
+        max_depth=2,
+        max_states=500,
+        batch_size=8,
+        page_entries=64,
+        resume=False,
+        shard_count=2,
+    )
+
+    single_store = PackedStateStore(output_single, get_value_codec("heuristic"), page_entries=64, readonly=True)
+    parallel_store = PackedStateStore(output_parallel, get_value_codec("heuristic"), page_entries=64, readonly=True)
+    root = initial_position()
+    first_layer = [apply_move(root, move) for move in legal_moves(root)[:4]]
+
+    assert single.stored_states == parallel.stored_states
+    assert single_store.lookup(root) == parallel_store.lookup(root)
+    for position in first_layer:
+        assert single_store.lookup(position) == parallel_store.lookup(position)
