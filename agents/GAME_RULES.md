@@ -27,5 +27,6 @@ Use this when coding **move generation** and **evaluation**. Exact edge cases mu
 
 ## Client implementation notes
 
-- **Field indexing:** The API uses string indices (`fieldIndex`, `toFieldIndex`). Map these to your internal board representation explicitly (document the mapping in code).
-- **Actions:** The HTTP API exposes `place`, `move`, and `remove` — align your state machine with these action types.
+- **Field indexing:** The API uses string indices (`fieldIndex`, `toFieldIndex`). The repo’s canonical **integer** labeling **`0…23`** and line sets are defined in **[`game/board.py`](../game/board.py)** (`ADJACENCY`, `MILLS`, ASCII diagram in-source). Convert strings ↔ ints at the HTTP boundary.
+- **Board payload:** `Board` expects server fields **`Index`** and **`Color`** (ints); empty=`0`, white=`1`, black=`2` — confirm against your server.
+- **Actions:** The HTTP API exposes `place`, `move`, and `remove` — align with **`Move.type`** and `GameState` in `game/board.py` as logic grows.

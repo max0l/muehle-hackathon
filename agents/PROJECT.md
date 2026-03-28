@@ -21,18 +21,19 @@ Build a **client** for **Nine Men’s Morris** that participates in games via an
 | **`openapi_client/`** | **Generated** Python client (OpenAPI Generator, Pydantic). Do not hand-edit; regenerate from the spec. |
 | **`.openapi-generator/`**, **`.openapi-generator-ignore`** | Generator metadata and ignore rules. |
 | **`main.py`** | Application entry (currently wires `Configuration` / `ApiClient` / `DefaultApi`); room to grow into a CLI or game loop. |
+| **`game/board.py`** | Hand-written **24-point** board: `ADJACENCY`, `MILLS`, `Board` (server `Index`/`Color` JSON), `Move`, `all_moves` (placement only for now). See **`agents/README.md`**. |
 | **`agents/`** | Agent-oriented docs: project overview (this file), API summary, game rules, opening-book / DB plans, generated-client notes in **`README.md`**. |
 | **`docs/`** | Generated Markdown API reference (mirrors `DefaultApi` and models). |
 | **`test/`** | Generated tests for `openapi_client` (plus any future hand-written tests). |
 | **`pyproject.toml`**, **`setup.py`**, **`requirements.txt`**, **`tox.ini`** | Packaging, dependencies, and test/lint automation. |
 | **`.github/workflows/`** | CI (e.g. Python package / pytest). |
 
-Game logic, search, and opening-book code are **not** present yet as top-level packages; the expected layout below is the target as those features land.
+**Started:** **`game/board.py`** holds geometry and a partial move list (placement). **Search, opening books, and full rules** are still to be added.
 
 ## Suggested module boundaries (implementation guidance)
 
-- **`state` / `board`:** Board encoding (e.g. 24 intersections), piece counts, phase enum (place / move / remove), current player color. Map to/from server `board` JSON (see **`agents/README.md`** — schema is open in OpenAPI).
-- **`rules` / `logic`:** Generate legal actions; apply moves; detect mills and forced removals; detect win/loss/draw if inferable from API state.
+- **`game/board.py` (current):** 24 intersections as `list[int]`, `ADJACENCY` / `MILLS`, `Board` from API field list `{ Index, Color }`, `GameState`, `Move`, `all_moves` (incomplete). Prefer growing **`game/`** for rules rather than putting logic inside **`openapi_client/`**.
+- **`rules` / `logic` (next):** Mill closure and `remove` plies, sliding / flying, terminals — extend `Board` or add e.g. `game/rules.py`. Keep server string indices and `state` strings in sync with measurements from the API.
 - **HTTP:** Use **`openapi_client`** for all Mühle REST calls. Add only a **thin wrapper** (retries, logging, env-based `host`) if needed — do not fork the generated client.
 - **`ai` / `search`:** Planners using the rule engine (heuristic evaluation + search). Keep I/O separate so the same brain can run offline tests.
 

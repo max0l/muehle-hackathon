@@ -13,6 +13,8 @@ This folder is **onboarding and reference material for AI coding agents** workin
 | [GASSER_OPENING_HEURISTICS.md](./GASSER_OPENING_HEURISTICS.md) | Gasser (1996): opening = search + DB leaves; rule variants; heuristic fallback when no DB |
 | [MID_ENDGAME_DATABASE_PLAN.md](./MID_ENDGAME_DATABASE_PLAN.md) | Plan: retrograde mid/end tables — canonical encoding, perfect indexing, predecessors, build & lookup |
 
+**Hand-written game code:** [`game/board.py`](../game/board.py) — see *Local game model* below.
+
 ## Quick facts
 
 - **Game:** Nine Men’s Morris (German: *Mühle*).
@@ -40,6 +42,45 @@ Contract file: **[`openapi.yaml`](../openapi.yaml)** — OpenAPI **3.0.3**, **`i
 **Errors:** `components.schemas.Error` — `{ "error": string }`. **`GameNotFound`** — *Unbekanntes oder ungültiges Spiel*, example `game not found`.
 
 Longer prose: **[SERVER_API.md](./SERVER_API.md)**. Human-oriented project layout: **[PROJECT.md](./PROJECT.md)**.
+
+## Local game model (`game/board.py`)
+
+First-party logic for the **24-point** Morris board lives in **[`game/board.py`](../game/board.py)** (not generated).
+
+### Point indexing `0 … 23`
+
+The file documents the standard triple-square layout in ASCII; coordinates match **`ADJACENCY`** and **`MILLS`**.
+
+- **Adjacency:** `ADJACENCY[i]` lists neighbors of point `i` (edges for sliding / distance-1 moves).
+- **Mills:** `MILLS` is the fixed list of **16** triples `(a, b, c)` that form lines on this labeling (outer, middle, inner squares plus four “cross” lines through midpoints).
+
+### Cell values (`Board.board`)
+
+- **`0`** — empty  
+- **`1`** — white  
+- **`2`** — black  
+
+### Server JSON → `Board`
+
+`Board.__init__` expects a **list of field dicts** from the API shape: each item uses **`"Index"`** (int, `0…23`) and **`"Color"`** (int `0/1/2`). Names are **PascalCase** to match the current server payload style.
+
+### Phase type
+
+`GameState = Literal["placing", "moving", "end"]` — coarse client enum; align with `get_game_state().state` strings once those are known from the server.
+
+### Moves
+
+- **`Move`:** `type` ∈ `place` | `move` | `remove` (same verbs as HTTP `action`), plus `fieldIndex` (int), optional `toFieldIndex`, optional `removedPiece` (placeholders for later rules).
+- **`all_moves(player)`:** Only **`placing`** is implemented (all empty-point `place` moves). **Mills / remove / moving phase** are **not** implemented yet (`# todo mills`, moving branch prints *not yet implemented*).
+
+### Display
+
+**`pretty_print()`** returns an ASCII diagram using **`·` / `W` / `B`** for empty / white / black.
+
+### Wiring to HTTP
+
+- Map API **`fieldIndex` / `toFieldIndex` strings** to **ints** `0…23` before constructing `Move` or comparing to `Board.board`.
+- Confirm server **color encoding** matches `1` = white, `2` = black (and empty `0`).
 
 ## Generated OpenAPI Python client (`openapi_client`)
 
@@ -79,7 +120,9 @@ Each operation also has `*_with_http_info` (access status headers) and `*_withou
 ### Agents: where to implement what
 
 - **Networking only** — use `openapi_client`; keep a thin wrapper if you need retries, logging, or env-based `host`.
-- **Board semantics, legality, AI** — **outside** this package; the OpenAPI spec does not fix field names inside `board` or the exact strings for `state` / `color` — **discover from the live server** or document samples when building the rule engine.
+- **Board geometry, adjacency, mills** — **`game/board.py`** (`ADJACENCY`, `MILLS`, `pretty_print`).
+- **Rules and full move generation** — extend **`game/board.py`** (or split into `game/rules.py` later); complete mill handling, `moving` / `remove`, and parity with server responses.
+- **OpenAPI** still does not constrain `board` JSON beyond `object` — validate **`Index` / `Color`** and string field indices against the live server.
 
 ## Canonical spec
 
