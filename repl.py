@@ -89,17 +89,33 @@ def _prompt_int_choice(prompt: str, valid: set[int]) -> int:
         print(f"Enter one of: {', '.join(str(x) for x in sorted(valid))}", file=sys.stderr)
 
 
-def run_interactive_wizard(host: str) -> tuple[UUID, bool, str, Optional[str]]:
-    """Returns (game_id, single_mode, player_name, our_color or None for dual).
+def run_interactive_wizard(
+    host: str,
+) -> tuple[UUID, bool, str, Optional[str], bool]:
+    """Returns (game_id, single_mode, player_name, our_color or None, spectator).
 
     In single-seat mode, color is fixed: create → white, join → black.
+    Spectator mode attaches read-only to an existing game (no add-player call).
     """
     print("Mühle REPL — interactive setup\n")
     mode = _prompt_int_choice(
         "Play mode — 1 = both players on this machine (local two-player), "
-        "2 = single seat (play against another client): ",
-        {1, 2},
+        "2 = single seat (play against another client), "
+        "3 = spectate (watch only, no player registration): ",
+        {1, 2, 3},
     )
+    if mode == 3:
+        raw_id = _prompt_nonempty("Enter game id to watch (UUID): ")
+        try:
+            game_id = UUID(raw_id)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid UUID: {raw_id}") from exc
+        print(
+            "\nSpectating — read-only; use refresh or quit.\n"
+            f"  Game id: {game_id}\n",
+        )
+        return game_id, False, "", None, True
+
     single_mode = mode == 2
 
     cj = _prompt_int_choice(
@@ -125,14 +141,16 @@ def run_interactive_wizard(host: str) -> tuple[UUID, bool, str, Optional[str]]:
         )
 
     if not single_mode:
-        return game_id, False, "", None
+        return game_id, False, "", None, False
 
     # Single seat: creator plays white, joiner plays black (no manual choice).
     player_name = "white" if cj == 1 else "black"
-    return game_id, True, player_name, player_name
+    return game_id, True, player_name, player_name, False
 
 
-def repl_move_help(single_mode: bool) -> str:
+def repl_move_help(*, single_mode: bool, spectator: bool = False) -> str:
+    if spectator:
+        return "Commands:  refresh  |  quit"
     common = "Also:  refresh  |  help  |  quit"
     if single_mode:
         return (
@@ -203,13 +221,16 @@ def build_static_header(
     *,
     single_mode: bool,
     our_color: Optional[str],
+    spectator: bool = False,
 ) -> list[str]:
     lines = [
         "Mühle REPL",
         f"Game ID:   {game_id}",
         f"API host:  {host}",
     ]
-    if single_mode:
+    if spectator:
+        lines.append("Mode:      Spectator (read-only, no player seat)")
+    elif single_mode:
         oc = our_color or "?"
         opp = "black" if oc == "white" else "white"
         lines.append(f"Mode:      Single seat — you: {oc}, opponent: {opp}")
@@ -254,13 +275,22 @@ def render_tui_frame(
     sys.stdout.flush()
 
 
-def parse_command(line: str, *, single_mode: bool) -> Optional[tuple[Any, ...]]:
+def parse_command(
+    line: str,
+    *,
+    single_mode: bool,
+    spectator_mode: bool = False,
+) -> Optional[tuple[Any, ...]]:
     parts = line.strip().split()
     if not parts:
         return None
     head = parts[0].lower()
     if head in ("quit", "exit"):
         return ("quit",)
+    if spectator_mode:
+        if head == "refresh":
+            return ("refresh",)
+        raise ValueError("spectator mode: only refresh and quit are allowed")
     if head == "help":
         return ("help",)
     if head == "refresh":
@@ -369,21 +399,21 @@ def run_repl_session(
     single_secret: Optional[str],
     single_mode: bool,
     our_color: Optional[str] = None,
+    spectator_mode: bool = False,
 ) -> None:
-    api_lock: Optional[threading.Lock] = threading.Lock() if single_mode else None
+    api_lock: Optional[threading.Lock] = (
+        threading.Lock() if single_mode and not spectator_mode else None
+    )
     stop_poll = threading.Event()
     poll_thread: Optional[threading.Thread] = None
-    help_text = repl_move_help(single_mode)
+    help_text = repl_move_help(single_mode=single_mode, spectator=spectator_mode)
 
     use_tui = sys.stdout.isatty() and sys.stdin.isatty()
-    poll_fetch = (
-        use_tui
-        and single_mode
-        and bool(our_color)
-        and sys.platform != "win32"
+    poll_fetch = use_tui and sys.platform != "win32" and (
+        spectator_mode or (single_mode and bool(our_color))
     )
 
-    if single_mode and our_color and not poll_fetch:
+    if single_mode and our_color and not poll_fetch and not spectator_mode:
         assert api_lock is not None
         with api_lock:
             cur = api.get_current_player(game_id)
@@ -401,6 +431,7 @@ def run_repl_session(
         host,
         single_mode=single_mode,
         our_color=our_color,
+        spectator=spectator_mode,
     )
 
     def lock_ctx():
@@ -490,7 +521,11 @@ def run_repl_session(
             if not raw:
                 continue
             try:
-                parsed = parse_command(raw, single_mode=single_mode)
+                parsed = parse_command(
+                    raw,
+                    single_mode=single_mode,
+                    spectator_mode=spectator_mode,
+                )
             except ValueError as exc:
                 print(f"Parse error: {exc}", file=sys.stderr)
                 continue
@@ -547,8 +582,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Mühle REPL: join a game locally (two seats) or alone (--single) for cross-client play. "
-            "Run with no arguments for an interactive setup."
+            "Mühle REPL: join a game locally (two seats), alone (--single), "
+            "or spectate (--spectate). Run with no arguments for interactive setup."
         ),
     )
     parser.add_argument(
@@ -569,6 +604,14 @@ def main() -> None:
         help="Register only this client as one player; use simplified commands (no white/black).",
     )
     parser.add_argument(
+        "--spectate",
+        action="store_true",
+        help=(
+            "Watch only (refresh / quit); does not register a player. "
+            "Requires --game-id."
+        ),
+    )
+    parser.add_argument(
         "--player",
         default="white",
         metavar="NAME",
@@ -581,12 +624,22 @@ def main() -> None:
         single_mode = args.single
         player_name_cli = args.player
         our_color_interactive: Optional[str] = None
+        spectator_mode = bool(args.spectate)
+        if spectator_mode:
+            if args.game_id is None:
+                parser.error("--spectate requires --game-id")
+            if args.single:
+                parser.error("--spectate cannot be used with --single")
     else:
         host = DEFAULT_API_HOST
         try:
-            game_id_arg, single_mode, player_name_cli, our_color_interactive = (
-                run_interactive_wizard(host)
-            )
+            (
+                game_id_arg,
+                single_mode,
+                player_name_cli,
+                our_color_interactive,
+                spectator_mode,
+            ) = run_interactive_wizard(host)
         except ApiException as exc:
             print(f"API error {exc.status}: {exc.reason}", file=sys.stderr)
             if exc.body:
@@ -601,10 +654,16 @@ def main() -> None:
                 game_id = game_id_arg
             elif game_id_arg is not None:
                 game_id = game_id_arg
-                print(
-                    "Joining an existing game — share this id so other players can join:\n"
-                    f"  {game_id}\n",
-                )
+                if spectator_mode:
+                    print(
+                        "Spectating — read-only (no player registration).\n"
+                        f"  {game_id}\n",
+                    )
+                else:
+                    print(
+                        "Joining an existing game — share this id so other players can join:\n"
+                        f"  {game_id}\n",
+                    )
             else:
                 created = api.create_game()
                 game_id = created.id
@@ -613,7 +672,18 @@ def main() -> None:
                     f"  {game_id}\n",
                 )
 
-            if single_mode:
+            if spectator_mode:
+                run_repl_session(
+                    api,
+                    game_id,
+                    host=host,
+                    secrets=None,
+                    single_secret=None,
+                    single_mode=False,
+                    our_color=None,
+                    spectator_mode=True,
+                )
+            elif single_mode:
                 joined = join_as_player(api, game_id, player_name_cli)
                 if not joined.secret:
                     print("Server did not return a player secret.", file=sys.stderr)
