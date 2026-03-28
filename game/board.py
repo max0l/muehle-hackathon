@@ -12,7 +12,7 @@ OTHER_PLAYER = {WHITE: BLACK, BLACK: WHITE}
 GameState = Literal["placing", "moving", "flying", "remove", "end"]
 Player = Literal[1, 2]
 
-# Board layout (same topology as ``Board.pretty_print`` and ``board_view.format_board_diagram``):
+# Board layout (same topology as ``Board.pretty_print`` and ``board_view.print_board``):
 #
 # 0 ----------- 1 ----------- 2
 # |             |             |
