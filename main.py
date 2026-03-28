@@ -74,6 +74,10 @@ class VerboseApiClient(openapi_client.ApiClient):
             return response_data
 
 POLL_INTERVAL_SEC = 5
+_SERVER_WAITING_STATE = "waitingforplayers"
+_SERVER_PLACING_STATES = {"placingstone", "puttingstone"}
+_SERVER_MOVING_STATE = "movingstone"
+_SERVER_WIN_STATES = {"winblack", "winwhite"}
 
 
 def _normalize_api_color(color: str | None) -> str | None:
@@ -86,6 +90,12 @@ def _normalize_game_state(game_state: str | None) -> str:
     if not game_state:
         return "moving"
     normalized = game_state.strip().lower()
+    if normalized in _SERVER_PLACING_STATES:
+        return "placing"
+    if normalized == _SERVER_MOVING_STATE:
+        return "moving"
+    if normalized in _SERVER_WIN_STATES:
+        return "end"
     if any(token in normalized for token in ("remove", "take", "schlag")):
         return "remove"
     if any(token in normalized for token in ("end", "over", "won", "lost", "draw", "finish")):
@@ -93,6 +103,45 @@ def _normalize_game_state(game_state: str | None) -> str:
     if any(token in normalized for token in ("place", "placing", "setz")):
         return "placing"
     return "moving"
+
+
+def _classify_server_state(game_state: str | None) -> Literal["waiting", "placing", "moving", "finished", "unknown"]:
+    if not game_state:
+        return "unknown"
+    normalized = game_state.strip().lower()
+    if normalized == _SERVER_WAITING_STATE:
+        return "waiting"
+    if normalized in _SERVER_PLACING_STATES:
+        return "placing"
+    if normalized == _SERVER_MOVING_STATE:
+        return "moving"
+    if normalized in _SERVER_WIN_STATES:
+        return "finished"
+    return "unknown"
+
+
+def _submit_selected_move(
+    api: DefaultApi,
+    game_id: UUID,
+    secret: str,
+    move: Move,
+) -> None:
+    if move.type == "move":
+        api.submit_move(
+            game_id,
+            move.type,
+            secret,
+            field_index=str(move.fieldIndex),
+            to_field_index=str(move.toFieldIndex),
+        )
+        return
+
+    if move.type == "remove":
+        target = move.removedPiece if move.removedPiece is not None else move.fieldIndex
+        api.submit_move(game_id, move.type, secret, field_index=str(target))
+        return
+
+    api.submit_move(game_id, move.type, secret, field_index=str(move.fieldIndex))
 
 
 def _board_fields_from_payload(board_state: Mapping[str, Any] | None) -> list[dict[str, int]]:
@@ -244,6 +293,20 @@ def make_move(
     debug: bool = False,
 ) -> Move | None:
     """Compute and submit the next move using the packed state DB."""
+    state_kind = _classify_server_state(game_state)
+    if state_kind == "waiting":
+        if debug:
+            _search_debug.debug("search: server state=%s; waiting for the second player", game_state)
+        return None
+    if state_kind == "finished":
+        if debug:
+            _search_debug.debug("search: server state=%s; game already finished", game_state)
+        return None
+    if board_state is None:
+        if debug:
+            _search_debug.debug("search: missing board payload for state=%s", game_state)
+        return None
+
     chosen = choose_move(
         store,
         board_state,
@@ -255,23 +318,16 @@ def make_move(
         return None
 
     move, payload = chosen
+    expected_move_type = {"placing": "place", "moving": "move"}.get(state_kind)
+    if expected_move_type is not None and move.type != expected_move_type:
+        raise ValueError(
+            f"Selected illegal action {move.type!r} for server state {game_state!r}; expected {expected_move_type!r}"
+        )
     if debug:
         _search_debug.debug("search: selected %s payload=%s", _format_move(move), payload)
     else:
         print(f"Selected move: {move} -> {payload}", file=sys.stderr)
-    if move.type == "move":
-        api.submit_move(
-            game_id,
-            move.type,
-            secret,
-            field_index=str(move.fieldIndex),
-            to_field_index=str(move.toFieldIndex),
-        )
-    elif move.type == "remove":
-        target = move.removedPiece if move.removedPiece is not None else move.fieldIndex
-        api.submit_move(game_id, move.type, secret, field_index=str(target))
-    else:
-        api.submit_move(game_id, move.type, secret, field_index=str(move.fieldIndex))
+    _submit_selected_move(api, game_id, secret, move)
     return move
 
 
@@ -286,16 +342,36 @@ def game_loop(
 ) -> None:
     """Poll current player every ``POLL_INTERVAL_SEC``; on our turn, load board/state and call ``make_move``."""
     player_number = 1 if our_color == "white" else 2
+    last_wait_reason: tuple[str, str | None] | None = None
     while True:
         current = api.get_current_player(game_id)
         api_color = _normalize_api_color(current.color)
         if api_color != our_color:
+            wait_reason = ("other-player", api_color)
+            if wait_reason != last_wait_reason:
+                if debug:
+                    _search_debug.debug("search: waiting for turn; current player=%s our color=%s", api_color, our_color)
+                else:
+                    print(f"Waiting for turn: current player is {api_color}.", file=sys.stderr)
+                last_wait_reason = wait_reason
             time.sleep(POLL_INTERVAL_SEC)
             continue
 
         board_resp = api.get_board(game_id)
         board_state = board_resp.board if isinstance(board_resp.board, dict) else None
         game_state_resp = api.get_game_state(game_id)
+        state_kind = _classify_server_state(game_state_resp.state)
+        if state_kind == "waiting":
+            wait_reason = ("waiting", game_state_resp.state)
+            if wait_reason != last_wait_reason:
+                if debug:
+                    _search_debug.debug("search: server state=%s; waiting for players", game_state_resp.state)
+                else:
+                    print("Waiting for players.", file=sys.stderr)
+                last_wait_reason = wait_reason
+            time.sleep(POLL_INTERVAL_SEC)
+            continue
+        last_wait_reason = None
         make_move(
             api,
             game_id,
