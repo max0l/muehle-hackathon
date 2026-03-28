@@ -8,7 +8,7 @@ import dataclasses
 import select
 import sys
 import threading
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 from uuid import UUID
 
 import openapi_client
@@ -23,11 +23,42 @@ from game.board_view import (
 )
 from game_client import DEFAULT_API_HOST, join_as_player
 
-POLL_INTERVAL_SINGLE_SEC = 2.0
+POLL_INTERVAL_SINGLE_SEC = 0.5
 
 ALT_SCREEN_ON = "\033[?1049h"
 ALT_SCREEN_OFF = "\033[?1049l"
 CLEAR_AND_HOME = "\033[2J\033[H"
+
+
+class _CountingRestClient:
+    """Wraps ``RESTClientObject``; counts each ``request()`` (one HTTP call)."""
+
+    __slots__ = ("_inner", "_lock", "_count")
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def get_count(self) -> int:
+        with self._lock:
+            return self._count
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            self._count += 1
+        return self._inner.request(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _attach_request_counter(
+    api_client: openapi_client.ApiClient,
+) -> _CountingRestClient:
+    wrapped = _CountingRestClient(api_client.rest_client)
+    api_client.rest_client = wrapped
+    return wrapped
 
 
 @dataclasses.dataclass
@@ -245,6 +276,7 @@ def render_tui_frame(
     sit: Situation,
     prev_board: Optional[Mapping[int, int]],
     help_text: str,
+    get_request_count: Callable[[], int],
     notice: str = "",
 ) -> None:
     hi = board_diff_indices(prev_board, sit.board)
@@ -270,6 +302,7 @@ def render_tui_frame(
         "(e.g. the opponent's last move).",
     )
     rows.append("")
+    rows.append(f"HTTP requests: {get_request_count()}")
     rows.append("muehle> ")
     sys.stdout.write("\n".join(rows))
     sys.stdout.flush()
@@ -395,6 +428,7 @@ def run_repl_session(
     game_id: UUID,
     *,
     host: str,
+    get_request_count: Callable[[], int],
     secrets: Optional[dict[str, str]],
     single_secret: Optional[str],
     single_mode: bool,
@@ -459,6 +493,7 @@ def run_repl_session(
                     sit=sit,
                     prev_board=before,
                     help_text=help_text,
+                    get_request_count=get_request_count,
                     notice=notice,
                 )
             else:
@@ -502,11 +537,11 @@ def run_repl_session(
                                 notice = "You are on the move."
                             paint(sit_idle, prev_board, notice, show_help=True)
                             continue
-                    line = (
-                        sys.stdin.readline()
-                        if use_tui
-                        else input("muehle> ")
-                    )
+                    if use_tui:
+                        line = sys.stdin.readline()
+                    else:
+                        print(f"HTTP requests: {get_request_count()}")
+                        line = input("muehle> ")
                     if use_tui and line == "":
                         input_interrupted = True
                     break
@@ -649,7 +684,9 @@ def main() -> None:
     configuration = openapi_client.Configuration(host=host)
     try:
         with openapi_client.ApiClient(configuration) as api_client:
+            req_counter = _attach_request_counter(api_client)
             api = openapi_client.DefaultApi(api_client)
+            get_request_count = req_counter.get_count
             if interactive:
                 game_id = game_id_arg
             elif game_id_arg is not None:
@@ -677,6 +714,7 @@ def main() -> None:
                     api,
                     game_id,
                     host=host,
+                    get_request_count=get_request_count,
                     secrets=None,
                     single_secret=None,
                     single_mode=False,
@@ -697,6 +735,7 @@ def main() -> None:
                     api,
                     game_id,
                     host=host,
+                    get_request_count=get_request_count,
                     secrets=None,
                     single_secret=joined.secret,
                     single_mode=True,
@@ -715,6 +754,7 @@ def main() -> None:
                     api,
                     game_id,
                     host=host,
+                    get_request_count=get_request_count,
                     secrets={"white": white.secret, "black": black.secret},
                     single_secret=None,
                     single_mode=False,
