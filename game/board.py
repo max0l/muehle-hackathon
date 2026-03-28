@@ -1,7 +1,8 @@
 import dataclasses
 from typing import Literal
 
-GameState = Literal["placing", "moving", "end"]
+# TODO update with real values
+GameState = Literal["placing", "moving"]
 Player = Literal[1, 2]
 
 # Board layout:
@@ -160,7 +161,7 @@ class Board:
                 else:
                     moves.append(base)
 
-        elif self.state == "moving" or self.state == "end":
+        elif self.state == "moving":
             can_fly = len(self._all_fields_with_state(player)) <= 3
             empty_fields = self._all_fields_with_state(None)
 
