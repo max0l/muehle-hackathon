@@ -25,17 +25,10 @@ def main() -> None:
     with openapi_client.ApiClient(configuration) as api_client:
         # Create an instance of the API class
         api_instance = openapi_client.DefaultApi(api_client)
-        game_id = UUID('126ac6b9-6b89-4d7b-9225-c0b0e3f4faaf') # UUID | 
-        player_name = 'player_1'
-
-        try:
-            # Spieler zum Spiel hinzufügen
-            api_response = api_instance.add_player(game_id, player_name)
-            print("The response of DefaultApi->add_player:\n")
-            pprint(api_response)
-        except ApiException as e:
-            print("Exception when calling DefaultApi->add_player: %s\n" % e)
-
+        game = api_instance.create_game()
+        print(game)
+        player = api_instance.add_player(game.id, "player1")
+        print(player)
 
 if __name__ == "__main__":
     main()

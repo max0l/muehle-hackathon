@@ -19,6 +19,28 @@ This folder is **onboarding and reference material for AI coding agents** workin
 - **This repo:** **Client only** — talks to a remote game server; does not host match state or authoritative rules on the wire beyond what the server enforces.
 - **Expected client capabilities:** Local **game logic** (validation, move listing, state representation), plus **heuristics / search / AI** to choose or analyze moves against the server API.
 
+## Mühle HTTP API (mirrors `openapi.yaml`)
+
+Contract file: **[`openapi.yaml`](../openapi.yaml)** — OpenAPI **3.0.3**, **`info.version`:** **1.0.0**, **`info.title`:** **Mühle HTTP API**.
+
+**`info.description` (spec, DE):** REST-Schnittstelle für die Mühle-Spielsession; Spiel anlegen, Spieler registrieren, Züge ausführen, Brett und Zustand lesen; beliebig viele Partien pro Server, isoliert per `gameId` (UUID).
+
+**`servers[0]`:** `http://172.28.40.187:40000` — *Lokaler Dev-Server*.
+
+| `operationId` | HTTP | Notes from spec |
+|---------------|------|-----------------|
+| `getOpenAPISpec` | GET `/openapi.yaml` | Returns YAML spec |
+| `createGame` | POST `/games` | `201` → `message`, `id` (uuid); `500` |
+| `addPlayer` | POST `/games/{gameId}/players` | form `playerName`; `200` → `secret` (+ optional `message`); `404` / `500` |
+| `submitMove` | POST `/games/{gameId}/moves` | form: `action` ∈ {`place`,`move`,`remove`}, `secretCode`, optional `fieldIndex`, `toFieldIndex` for move; `200` / `400` / `404` / `500` |
+| `getGameState` | GET `/games/{gameId}/state` | `200` → `state`; `404` |
+| `getCurrentPlayer` | GET `/games/{gameId}/current-player` | `200` → `color` (e.g. `White`); `404` |
+| `getBoard` | GET `/games/{gameId}/board` | `200` → `board` (object); `404` |
+
+**Errors:** `components.schemas.Error` — `{ "error": string }`. **`GameNotFound`** — *Unbekanntes oder ungültiges Spiel*, example `game not found`.
+
+Longer prose: **[SERVER_API.md](./SERVER_API.md)**. Human-oriented project layout: **[PROJECT.md](./PROJECT.md)**.
+
 ## Generated OpenAPI Python client (`openapi_client`)
 
 The repo root package **`openapi_client/`** is **auto-generated** from **`openapi.yaml`** by [OpenAPI Generator](https://openapi-generator.tech) (`PythonClientCodegen`, Pydantic v2 models, `urllib3`). Treat it as **read-only**: fix the spec and **regenerate** instead of editing generated files. Metadata: **`.openapi-generator/`**, **`.openapi-generator-ignore`**, root **`README.md`** and **`docs/`** (per-operation examples).
@@ -61,4 +83,4 @@ Each operation also has `*_with_http_info` (access status headers) and `*_withou
 
 ## Canonical spec
 
-For request/response shapes and status codes, always prefer **`openapi.yaml`** in the repository root over this prose; `SERVER_API.md` is a shortened mirror for agents. The **`openapi_client`** package is the typed Python projection of that same spec.
+Always prefer **[`openapi.yaml`](../openapi.yaml)** over this folder for exact request/response shapes and status codes. The **`openapi_client`** package is the generated Python projection of that spec (method names follow `operationId`, e.g. `create_game` ← `createGame`).

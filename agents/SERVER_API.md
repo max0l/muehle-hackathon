@@ -1,54 +1,63 @@
 # Server HTTP API (summary)
 
-**Source of truth:** `openapi.yaml` at the repository root (`Mühle HTTP API`, OpenAPI 3.0.3).
+**Source of truth:** [`openapi.yaml`](../openapi.yaml) at the repository root — **Mühle HTTP API**, OpenAPI **3.0.3**, version **1.0.0**.
 
-## Base URL
+**Description (from spec):** REST-Schnittstelle für die Mühle-Spielsession: Spiel anlegen, Spieler registrieren, Züge ausführen, Brett und Zustand lesen. Pro Server-Prozess können beliebig viele Partien parallel laufen; jede Partie hat eine eigene `gameId` (UUID), alle Aktionen sind pro Partie isoliert.
 
-Configured under `servers` in the spec (example in spec: `http://172.28.40.187:40000`). Override per environment.
+## Base URL (`servers`)
 
-## Endpoints
+| URL | `description` in spec |
+|-----|------------------------|
+| `http://172.28.40.187:40000` | Lokaler Dev-Server |
 
-### `GET /openapi.yaml`
+Override per environment via `openapi_client.Configuration(host=...)`.
 
-Returns the OpenAPI document (YAML).
+## Endpoints (`paths`)
 
-### `POST /games`
+### `GET /openapi.yaml` — `getOpenAPISpec`
 
-Creates a new game. **Response:** `201` JSON `{ message, id }` where `id` is a UUID (`gameId`).
+- **200:** OpenAPI 3.0 document (YAML), `application/yaml`, body typed as string in the spec.
 
-### `POST /games/{gameId}/players`
+### `POST /games` — `createGame`
 
-**Body (form):** `playerName` (required).
+- **201:** Spiel erzeugt — JSON object, required properties: `message` (string), `id` (string, uuid). Example `message`: *Game created*.
+- **500:** Serverfehler — `Error`.
 
-**Response:** `200` JSON with `message` and `secret` — the **secret** is the `secretCode` for moves.
+### `POST /games/{gameId}/players` — `addPlayer`
 
-Errors: `404` game not found; `500` e.g. game full.
+- **Request:** `application/x-www-form-urlencoded`, required: `playerName` (string).
+- **200:** Spieler hinzugefügt — JSON with optional `message`, `secret` (string, *Geheimcode für Züge* → use as `secretCode` on moves).
+- **404:** `GameNotFound` — unknown or invalid game (`{"error": "..."}`, example `game not found`).
+- **500:** e.g. game full — `Error`.
 
-### `POST /games/{gameId}/moves`
+### `POST /games/{gameId}/moves` — `submitMove`
 
-**Body (form):**
+- **Request:** `application/x-www-form-urlencoded`:
+  - Required: `action` — enum **`place`**, **`move`**, **`remove`**; `secretCode` (string).
+  - Optional: `fieldIndex` — bei place/remove Feld; bei move Startfeld.
+  - Optional: `toFieldIndex` — nur bei `action=move`.
+- **200:** Zug akzeptiert — JSON with optional `message` (example: *Stone moved*).
+- **400:** Ungültige action oder fehlende Felder — `Error`.
+- **404:** `GameNotFound`.
+- **500:** Regelverletzung o. Ä. — `Error`.
 
-| Field | Required | Notes |
-|-------|----------|--------|
-| `action` | yes | `place` \| `move` \| `remove` |
-| `secretCode` | yes | From player registration |
-| `fieldIndex` | depends | For `place` / `remove`, and **start** field for `move` |
-| `toFieldIndex` | for `move` | Destination field |
+### `GET /games/{gameId}/state` — `getGameState`
 
-**Response:** `200` on success; `400` invalid action or missing fields; `404` game not found; `500` rule violation, etc.
+- **200:** JSON object with `state` (string).
+- **404:** `GameNotFound`.
 
-### `GET /games/{gameId}/state`
+### `GET /games/{gameId}/current-player` — `getCurrentPlayer`
 
-**Response:** `200` JSON with `state` (string) — game phase / status as defined by server.
+- **200:** JSON object with `color` (string), example `White`.
+- **404:** `GameNotFound`.
 
-### `GET /games/{gameId}/current-player`
+### `GET /games/{gameId}/board` — `getBoard`
 
-**Response:** `200` JSON with `color` (e.g. `White`).
+- **200:** JSON object with `board` (object) — field layout as defined by server (schema not further constrained in the spec).
+- **404:** `GameNotFound`.
 
-### `GET /games/{gameId}/board`
+## Components
 
-**Response:** `200` JSON with `board` (object) — field layout as defined by server.
-
-## Error shape
-
-Typical error JSON: `{ "error": "..." }` (see `components.schemas.Error` in the spec).
+- **Parameter `gameId`:** path, required, string, format **uuid**.
+- **Schema `Error`:** object with property `error` (string).
+- **Response `GameNotFound`:** description *Unbekanntes oder ungültiges Spiel*, body `Error`, example `error: game not found`.
